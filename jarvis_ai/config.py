@@ -257,7 +257,10 @@ SILENCE_RMS = 280            # int16 RMS threshold for "silence" (post-gain)
 
 # --- Ultra beat mode ---
 EARCON_ENABLED = True
-BARGE_IN_ENABLED = True
+# Without acoustic echo cancellation, listening while Leha speaks can feed her
+# own reply back into the mic and create a second response. Keep this off until
+# an AEC-capable audio pipeline is installed.
+BARGE_IN_ENABLED = False
 VAD_CALIBRATION_SECONDS = 1.5
 BARGE_IN_RMS_BOOST = 2.0
 ASSISTANT_EARCON_FREQ = 1200

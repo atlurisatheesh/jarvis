@@ -110,6 +110,9 @@ class SafeEndToEndTests(unittest.TestCase):
     def test_voice_capture_allows_a_natural_pause(self):
         self.assertGreaterEqual(config.SILENCE_MS, 600)
 
+    def test_barge_in_is_disabled_without_echo_cancellation(self):
+        self.assertFalse(config.BARGE_IN_ENABLED)
+
     def test_auto_ears_prefers_deepgram_then_openai_then_groq(self):
         with patch.object(config, "DEEPGRAM_API_KEY", "deepgram-key"), \
              patch.object(config, "OPENAI_API_KEY", "openai-key"), \
