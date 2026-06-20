@@ -256,6 +256,15 @@ class Mouth:
         Plays chunks sequentially (no interruption between sentences).
         Returns the full text spoken.
         """
+        # A voice clone is synthesized as a complete audio file. Starting it on
+        # partial streamed text means a later cloud fallback can become a second
+        # overlapping reply. Buffer it and speak exactly once instead.
+        if self.engine_name == "clone":
+            full_text = "".join(token_gen).strip()
+            if full_text:
+                self.say(full_text)
+            return full_text
+
         PUNCT = set(".!?,;")
         MIN_WORDS = 6
 
