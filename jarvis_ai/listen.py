@@ -269,8 +269,24 @@ class LehaSession:
 
 
 def main():
+    # A second always-on listener hears the same command and speaks a duplicate
+    # reply. Use a Windows named mutex so only one Leha process can own the mic.
+    mutex = None
+    if __import__("os").name == "nt":
+        import ctypes
+
+        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\LehaVoiceAssistant")
+        if not mutex or ctypes.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            if mutex:
+                ctypes.windll.kernel32.CloseHandle(mutex)
+            print("Leha is already running. Use the existing listener instead.", flush=True)
+            return
     session = LehaSession()
-    session.run()
+    try:
+        session.run()
+    finally:
+        if mutex:
+            ctypes.windll.kernel32.CloseHandle(mutex)
 
 
 if __name__ == "__main__":
