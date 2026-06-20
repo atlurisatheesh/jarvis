@@ -69,9 +69,6 @@ class AssistantSession:
 
         # Bare wake word, like "Leha" -> short acknowledgement.
         if triggered and len(command) < 2:
-            # A cloned acknowledgement can take longer than the user's next
-            # sentence, then play late as a second voice. The listener earcon
-            # is enough confirmation in clone mode.
             reply = "Yes, Sir?" if config.SPEAK_WAKE_ACK else ""
             set_last_reply(reply)
             return TurnResult(heard, reply, True)

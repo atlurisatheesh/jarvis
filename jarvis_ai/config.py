@@ -156,9 +156,9 @@ COMMAND_SECONDS = 5           # how long to listen after wake
 # --- Mouth (text-to-speech) ---
 # "edge" is the live/instant human voice.
 # "hf" calls a warm Hugging Face Inference Endpoint.
-# "clone" uses the supplied reference recordings. It is slower on CPU, but
-# keeping it strict avoids mixing a generic system/Edge voice into Leha replies.
-TTS_ENGINE = "clone"
+# Clone mode is disabled for live use: CPU synthesis takes around a minute and
+# can leave delayed replies. Keep the reference setup below for a later GPU run.
+TTS_ENGINE = "edge"
 TTS_RATE = 175
 # Neerja is a female Indian-English neural voice. It is not a true clone, but
 # it is much more natural for live assistant replies than the older system voice.
@@ -176,7 +176,7 @@ CLONE_TTS_REFERENCE = str(VOICES_DIR / "leha_reference_mix.wav")
 CLONE_TTS_MODEL_DIR = str(VOICES_DIR / "hf_cache" / "chatterbox")
 CLONE_TTS_DEVICE = "cpu"      # set "cuda" only on a machine with NVIDIA CUDA
 CLONE_TTS_TIMEOUT_SECONDS = 180
-CLONE_TTS_STRICT = True       # cloned voice only; never mix fallback voices
+CLONE_TTS_STRICT = True       # retained for later GPU clone mode; unused by edge
 CLONE_TTS_EXAGGERATION = 0.5
 CLONE_TTS_CFG_WEIGHT = 0.5
 CLONE_TTS_TEMPERATURE = 0.8

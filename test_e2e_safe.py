@@ -6,7 +6,6 @@ system setting, opens an app, contacts a phone, or executes power commands.
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from jarvis_ai import config
@@ -83,9 +82,8 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertEqual(commands[2], ("shell", "input", "keyevent", "KEYCODE_HOME"))
 
     def test_voice_configuration_is_loadable(self):
-        self.assertEqual(config.TTS_ENGINE, "clone")
-        self.assertTrue(config.CLONE_TTS_STRICT)
-        self.assertTrue(Path(config.CLONE_TTS_REFERENCE).exists())
+        self.assertEqual(config.TTS_ENGINE, "edge")
+        self.assertTrue(config.EDGE_TTS_VOICE)
 
     def test_rate_limit_uses_local_brain_instead_of_spoken_error(self):
         class RateLimitedGroq:
