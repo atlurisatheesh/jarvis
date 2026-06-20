@@ -79,6 +79,20 @@ def google_calendar_upcoming(days: int = 7) -> str:
     return "Upcoming: " + "; ".join(f"{e.get('summary', 'Untitled')} at {e.get('start', {}).get('dateTime', e.get('start', {}).get('date', ''))}" for e in events)
 
 
+def google_gmail_search(query: str = "", limit: int = 5) -> str:
+    """Search Gmail through the approved OAuth account, returning message summaries."""
+    service = _service("gmail", "v1")
+    messages = service.users().messages().list(userId="me", q=query, maxResults=max(1, min(int(limit), 10))).execute().get("messages", [])
+    if not messages:
+        return "No matching Gmail messages."
+    rows = []
+    for item in messages:
+        msg = service.users().messages().get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject"]).execute()
+        headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        rows.append(f"{headers.get('from', 'Unknown')}: {headers.get('subject', '(no subject)')}")
+    return "Gmail: " + "; ".join(rows)
+
+
 def google_drive_search(query: str) -> str:
     service = _service("drive", "v3")
     safe = query.replace("'", "\\'")
@@ -107,6 +121,7 @@ SKILLS = [
           "query": {"type": "string"}
       }, "required": ["query"]}}, search_google_maps),
     ({"name": "google_calendar_upcoming", "description": "List upcoming Google Calendar events.", "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}}}, google_calendar_upcoming),
+    ({"name": "google_gmail_search", "description": "Search the user's Gmail through Google OAuth and return sender and subject summaries.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}, google_gmail_search),
     ({"name": "google_drive_search", "description": "Search the user's Google Drive files by name.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}, google_drive_search),
     ({"name": "google_contacts_search", "description": "Search the user's Google Contacts by name.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}, google_contacts_search),
 ]
