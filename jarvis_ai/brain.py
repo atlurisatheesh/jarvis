@@ -206,6 +206,10 @@ class _GroqBrain:
                 if r.status_code == 429:
                     raise _GroqRateLimited("Groq rate limit reached")
                 raise requests.HTTPError(response=r)
+        except _GroqRateLimited:
+            # Let the dispatcher choose the local fallback. Calling ask() here
+            # only turns a quota error into a spoken "brain busy" message.
+            raise
         except Exception as e:
             print(f"[brain] stream failed: {e}, falling back to non-stream")
             yield self.ask(user_text)
@@ -376,8 +380,10 @@ class Brain:
             try:
                 return self._groq.ask(user_text)
             except _GroqRateLimited:
-                print("[brain] Groq rate limited; keeping the listener responsive.")
-                return config.GROQ_RATE_LIMIT_REPLY
+                if self._local:
+                    print("[brain] Groq rate limited; answering with local Ollama.")
+                    return self._local.ask(user_text)
+                return "I cannot reach my cloud brain right now, Sir."
             except Exception as e:
                 print(f"[brain] Groq error: {e}")
                 if self._local:
@@ -393,8 +399,11 @@ class Brain:
                 yield from self._groq.ask_stream(user_text)
                 return
             except _GroqRateLimited:
-                print("[brain] Groq stream rate limited; keeping the listener responsive.")
-                yield config.GROQ_RATE_LIMIT_REPLY
+                if self._local:
+                    print("[brain] Groq stream rate limited; answering with local Ollama.")
+                    yield self._local.ask(user_text)
+                    return
+                yield "I cannot reach my cloud brain right now, Sir."
                 return
             except Exception as e:
                 print(f"[brain] Groq stream error: {e}")

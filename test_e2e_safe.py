@@ -87,7 +87,7 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertTrue(config.CLONE_TTS_STRICT)
         self.assertTrue(Path(config.CLONE_TTS_REFERENCE).exists())
 
-    def test_rate_limit_does_not_call_slow_local_fallback(self):
+    def test_rate_limit_uses_local_brain_instead_of_spoken_error(self):
         class RateLimitedGroq:
             def ask(self, _text):
                 raise _GroqRateLimited("test")
@@ -104,8 +104,8 @@ class SafeEndToEndTests(unittest.TestCase):
         brain = Brain.__new__(Brain)
         brain._groq = RateLimitedGroq()
         brain._local = local
-        self.assertEqual(Brain.ask(brain, "hello"), config.GROQ_RATE_LIMIT_REPLY)
-        self.assertFalse(local.called)
+        self.assertEqual(Brain.ask(brain, "hello"), "slow local reply")
+        self.assertTrue(local.called)
 
     def test_voice_capture_allows_a_natural_pause(self):
         self.assertGreaterEqual(config.SILENCE_MS, 600)
