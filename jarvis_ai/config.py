@@ -217,6 +217,10 @@ def _load_or_make_pin() -> str:
     return pin
 WEB_PIN = _load_or_make_pin()
 
+# --- Google OAuth ---
+GOOGLE_CREDENTIALS_FILE = str(BASE_DIR.parent / "google_credentials.json")
+GOOGLE_TOKEN_FILE = str(BASE_DIR.parent / "google_token.json")
+
 # --- Gmail personal context (IMAP, stdlib) ---
 # App password (NOT your login password) from https://myaccount.google.com/apppasswords
 # Save the 16-char password to D:\jarvis\.gmail_creds (gitignored) or env GMAIL_APP_PASSWORD.

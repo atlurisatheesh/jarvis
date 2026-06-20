@@ -30,3 +30,7 @@ openvoice-cli      # tone-color voice conversion engine
 torch==2.6.0       # chatterbox-compatible torch build
 torchaudio==2.6.0
 torchvision==0.21.0
+google-api-python-client
+google-auth-oauthlib
+google-api-python-client
+google-auth-oauthlib

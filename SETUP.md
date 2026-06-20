@@ -136,6 +136,18 @@ Leha opens a Google Maps URL in your browser. Gmail, Calendar, Drive, and
 Contacts require a separate Google OAuth desktop-client setup; do not put your
 Google account password in this project.
 
+## Google Calendar, Drive, and Contacts
+
+1. Save the Google Desktop OAuth client JSON as `D:\jarvis\google_credentials.json`.
+2. Run the authorization once. A browser window opens for Google consent:
+
+   ```powershell
+   python -m jarvis_ai.google_auth
+   ```
+
+3. The local `google_token.json` is created after approval. It is private and
+   ignored by Git. Leha can then use the Google Calendar, Drive, and Contacts tools.
+
 ## Better ears (speech-to-text)
 
 Leha now supports four speech-to-text engines:
