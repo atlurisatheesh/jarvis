@@ -72,7 +72,9 @@ class LehaSession:
         self.brain = Brain()
         self.mouth = Mouth()
         self.scheduler = Scheduler(
-            mouth=Mouth(),
+            # All replies must share the same speech controller. A second Mouth
+            # instance can overlap audio with a command response or briefing.
+            mouth=self.mouth,
             brief_callback=lambda: _morning_brief(self.mouth),
         )
         self.scheduler.start()

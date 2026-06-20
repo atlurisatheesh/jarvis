@@ -83,8 +83,8 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertEqual(commands[2], ("shell", "input", "keyevent", "KEYCODE_HOME"))
 
     def test_voice_configuration_is_loadable(self):
-        self.assertEqual(config.TTS_ENGINE, "edge")
-        self.assertTrue(config.EDGE_TTS_VOICE)
+        self.assertEqual(config.TTS_ENGINE, "clone")
+        self.assertTrue(config.CLONE_TTS_STRICT)
         self.assertTrue(Path(config.CLONE_TTS_REFERENCE).exists())
 
     def test_rate_limit_does_not_call_slow_local_fallback(self):
