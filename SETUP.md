@@ -125,6 +125,17 @@ http://127.0.0.1:8001
    ```
 4. Voice examples: "Leha, take a screenshot on my phone", "open WhatsApp on my phone".
 
+## Google Maps
+
+Google Maps directions work without saving a Google password or API key. Try:
+
+- "Leha, navigate to Chennai airport"
+- "Leha, find restaurants near me on Google Maps"
+
+Leha opens a Google Maps URL in your browser. Gmail, Calendar, Drive, and
+Contacts require a separate Google OAuth desktop-client setup; do not put your
+Google account password in this project.
+
 ## Better ears (speech-to-text)
 
 Leha now supports four speech-to-text engines:

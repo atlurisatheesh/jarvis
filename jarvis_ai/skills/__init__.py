@@ -5,11 +5,11 @@
 """
 from . import (system, files, web, media, notes, phone,
                reminders, routines, desktop, docs, farm, universal, timer, windows,
-               vision, context, email)
+               vision, context, email, google)
 
 _modules = [system, files, web, media, notes, phone,
             reminders, routines, desktop, docs, farm, universal, timer, windows,
-            vision, context, email]
+            vision, context, email, google]
 
 TOOLS = []          # Ollama/OpenAI-style tool schemas
 DISPATCH = {}       # name -> python function

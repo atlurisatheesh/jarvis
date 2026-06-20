@@ -378,6 +378,11 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         print(f"[direct] play_youtube({query!r}) -> {result}", flush=True)
         return IntentResult(True, result, action="youtube_play")
 
+    maps_match = re.match(r"^(?:navigate|directions?)\s+(?:to\s+)?(.+)$", low)
+    if maps_match:
+        result = skills.run_tool("open_google_maps", {"destination": maps_match.group(1).strip()})
+        return IntentResult(True, result, action="google_maps")
+
     phone_open = re.match(r"^(?:open|launch|start)\s+(.+?)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
     if phone_open:
         app_name = phone_open.group(1).strip()
