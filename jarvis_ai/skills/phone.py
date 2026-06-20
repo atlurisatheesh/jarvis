@@ -27,6 +27,47 @@ def phone_status() -> str:
     return out or "No phone detected."
 
 
+def phone_wifi_setup(ip: str = "") -> str:
+    """Switch the USB-connected phone to wireless ADB so it works untethered.
+
+    One time: phone plugged via USB, same Wi-Fi as laptop. This puts adb in
+    TCP mode and connects over Wi-Fi; afterwards the USB cable can be removed.
+    Auto-detects the phone IP if not given.
+    """
+    # 1) get phone IP if not provided
+    if not ip:
+        out = _adb("shell", "ip", "-f", "inet", "addr", "show", "wlan0")
+        import re
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+        if not m:
+            return ("Plug the phone via USB first and ensure Wi-Fi is on. "
+                    "Could not read phone IP.")
+        ip = m.group(1)
+    # 2) restart adb in TCP mode
+    _adb("tcpip", "5555", timeout=15)
+    time.sleep(1.5)
+    # 3) connect over Wi-Fi
+    res = _adb("connect", f"{ip}:5555", timeout=15)
+    if "connected" in res.lower():
+        try:
+            (config.BASE_DIR.parent / ".phone_ip").write_text(f"{ip}:5555",
+                                                              encoding="utf-8")
+        except Exception:
+            pass
+        return f"Phone is now wireless at {ip}. You can unplug the cable, Sir."
+    return f"Wi-Fi connect result: {res}"
+
+
+def phone_wifi_reconnect() -> str:
+    """Reconnect to the last-known wireless phone (after laptop/phone restart)."""
+    f = config.BASE_DIR.parent / ".phone_ip"
+    if not f.exists():
+        return "No saved phone Wi-Fi address. Run wifi setup once over USB first."
+    addr = f.read_text(encoding="utf-8").strip()
+    res = _adb("connect", addr, timeout=15)
+    return f"Reconnect {addr}: {res}"
+
+
 def phone_open_app(package: str) -> str:
     _adb("shell", "monkey", "-p", package,
          "-c", "android.intent.category.LAUNCHER", "1")
@@ -196,4 +237,13 @@ SKILLS = [
       "description": "Place a phone call to a number from the phone.",
       "parameters": {"type": "object",
                      "properties": {"number": {"type": "string"}}, "required": ["number"]}}, phone_call),
+    ({"name": "phone_wifi_setup",
+      "description": "Make the USB-connected phone work wirelessly over Wi-Fi (untether). "
+                     "Run once with the cable plugged in.",
+      "parameters": {"type": "object",
+                     "properties": {"ip": {"type": "string", "description": "Phone IP (auto if blank)"}}}},
+     phone_wifi_setup),
+    ({"name": "phone_wifi_reconnect",
+      "description": "Reconnect to the last wireless phone after a restart.",
+      "parameters": {"type": "object", "properties": {}}}, phone_wifi_reconnect),
 ]
