@@ -9,7 +9,9 @@ MEMORY_DIR = BASE_DIR / "memory_store"
 
 # --- Brain ---
 # Engine: "groq" (cloud, instant), "local" (Ollama on CPU), "auto" (Groq → local fallback)
-BRAIN_ENGINE = "auto"
+# Clone TTS is intentionally slow on this CPU. Keep the brain local so cloud
+# quota failures never generate a second status reply while synthesis is pending.
+BRAIN_ENGINE = "local"
 GROQ_BRAIN_MODEL = "llama-3.1-8b-instant"   # higher daily limit + faster than 70b
 # Only send these tools to the cloud brain (keeps each request small -> under
 # the free-tier 6000 tokens/min limit). Reflexes in assistant_core handle the
@@ -51,6 +53,7 @@ ASSISTANT_NAME = "Leha"
 USER_NAME = "Sir"
 ASSISTANT_MODE = "ultra"
 LEHA_BUILD = "2026.06.20-rate-limit-local-fallback"
+SPEAK_WAKE_ACK = False
 
 SYSTEM_PROMPT = (
     "You are Leha, a capable voice assistant on the user's Windows laptop. "
