@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>JARVIS</title>
+<style>
+  :root { --bg:#0a0e14; --panel:#0f1622; --accent:#22d3ee; --accent2:#0ea5e9; --text:#dbeafe; --muted:#64748b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;
+         background:radial-gradient(1200px 800px at 50% -10%, #10213a 0%, var(--bg) 60%); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+  header { padding:18px 24px; font-weight:700; letter-spacing:4px; color:var(--accent); font-size:14px; }
+  #log { flex:1; overflow-y:auto; padding:16px 24px; display:flex; flex-direction:column; gap:12px; }
+  .msg { max-width:75%; padding:10px 14px; border-radius:12px; line-height:1.4; white-space:pre-wrap; }
+  .you { align-self:flex-end; background:#1e293b; }
+  .jarvis { align-self:flex-start; background:linear-gradient(135deg,#0c2a3a,#0a1f33); border:1px solid #134e5e; }
+  .meta { font-size:11px; color:var(--muted); margin-bottom:2px; }
+  footer { padding:18px 24px 28px; display:flex; flex-direction:column; align-items:center; gap:12px; }
+  #status { font-size:12px; color:var(--muted); min-height:16px; }
+  #mic { width:84px; height:84px; border-radius:50%; border:none; cursor:pointer; color:#001018; font-size:14px; font-weight:700;
+         background:radial-gradient(circle at 50% 35%, var(--accent), var(--accent2)); transition:.15s; }
+  #mic:hover { transform:scale(1.05); }
+  #mic.on { background:radial-gradient(circle at 50% 35%, #34d399, #059669); }
+  #mic.rec { background:radial-gradient(circle at 50% 35%, #f87171, #dc2626); animation:pulse 1.2s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(248,113,113,.6)} 70%{box-shadow:0 0 0 22px rgba(248,113,113,0)} 100%{box-shadow:0 0 0 0 rgba(248,113,113,0)} }
+  .row { display:flex; gap:8px; width:100%; max-width:640px; }
+  #txt { flex:1; background:var(--panel); border:1px solid #1e293b; color:var(--text); padding:10px 14px; border-radius:10px; font-size:14px; }
+  #send { background:#1e293b; color:var(--accent); border:1px solid #134e5e; border-radius:10px; padding:0 16px; cursor:pointer; }
+</style>
+</head>
+<body>
+  <header>● J.A.R.V.I.S — offline · hands-free</header>
+  <div id="log"></div>
+  <footer>
+    <div id="status">Click the mic ONCE to start hands-free listening.</div>
+    <button id="mic" title="Toggle hands-free">START</button>
+    <div class="row">
+      <input id="txt" placeholder="…or type a command" autocomplete="off" />
+      <button id="send">Send</button>
+    </div>
+  </footer>
+
+<script>
+const log = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const micBtn = document.getElementById('mic');
+const txt = document.getElementById('txt');
+
+function add(role, text, label){
+  const el = document.createElement('div');
+  el.className = 'msg ' + (role==='you'?'you':'jarvis');
+  el.innerHTML = '<div class="meta">'+(label||(role==='you'?'You':'JARVIS'))+'</div>'+text;
+  log.appendChild(el); log.scrollTop = log.scrollHeight;
+}
+
+// ---- speech output; pause listening while JARVIS talks (avoid self-capture) ----
+let speaking = false;
+function speak(text){
+  return new Promise(res=>{
+    try {
+      const u = new SpeechSynthesisUtterance(text); u.rate = 1.05;
+      speaking = true;
+      u.onend = ()=>{ speaking = false; res(); };
+      u.onerror = ()=>{ speaking = false; res(); };
+      speechSynthesis.speak(u);
+    } catch(e){ speaking = false; res(); }
+  });
+}
+
+async function sendText(t){
+  add('you', t);
+  statusEl.textContent = 'Thinking…';
+  try {
+    const r = await fetch('/api/text', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:t})});
+    const d = await r.json();
+    add('jarvis', d.reply); await speak(d.reply);
+  } catch(e){ add('jarvis','(server error)'); }
+  statusEl.textContent = listening ? 'Listening… just speak.' : 'Click the mic to start.';
+}
+document.getElementById('send').onclick = ()=>{ const t=txt.value.trim(); if(t){ txt.value=''; sendText(t);} };
+txt.addEventListener('keydown', e=>{ if(e.key==='Enter'){ const t=txt.value.trim(); if(t){ txt.value=''; sendText(t);} }});
+
+// ---- hands-free voice activity detection ----
+let listening=false, recording=false, busy=false;
+let stream, ac, analyser, data, mime, recorder, chunks=[];
+let silenceStart=0, speechFrames=0, recStartT=0;
+const START_RMS = 10;     // speech onset (tune: lower = more sensitive)
+const SILENCE_MS = 900;   // stop after this much quiet
+const MIN_REC_MS = 350;   // ignore blips shorter than this
+
+function rms(){
+  analyser.getByteTimeDomainData(data);
+  let s=0; for(let i=0;i<data.length;i++){ const d=data[i]-128; s+=d*d; }
+  return Math.sqrt(s/data.length);
+}
+
+function startRec(){
+  chunks=[]; recorder = new MediaRecorder(stream, {mimeType:mime});
+  recorder.ondataavailable = e=>{ if(e.data.size>0) chunks.push(e.data); };
+  recorder.onstop = onRec;
+  recorder.start(); recording=true; recStartT=performance.now(); silenceStart=0;
+  micBtn.classList.add('rec'); statusEl.textContent='Listening to you…';
+}
+function stopRec(){ if(recorder && recorder.state==='recording') recorder.stop(); recording=false; micBtn.classList.remove('rec'); }
+
+async function onRec(){
+  const dur = performance.now()-recStartT;
+  const blob = new Blob(chunks, {type:mime});
+  if(dur < MIN_REC_MS || blob.size < 1200){ return; }   // too short, skip
+  busy=true; statusEl.textContent='…';
+  try {
+    const fd = new FormData(); fd.append('audio', blob, 'rec.webm');
+    const r = await fetch('/api/voice', {method:'POST', body:fd});
+    const d = await r.json();
+    if(d.acted){
+      if(d.heard) add('you', d.heard, 'You');
+      add('jarvis', d.reply);
+      statusEl.textContent='JARVIS speaking…';
+      await speak(d.reply);
+    } else {
+      // not addressed to JARVIS — stay silent, keep listening
+      statusEl.textContent = d.heard ? 'Heard (ignored): '+d.heard : '';
+    }
+  } catch(e){ /* ignore transient errors, keep listening */ }
+  busy=false; statusEl.textContent = listening ? 'Say "Jarvis"…' : '';
+}
+
+function loop(){
+  if(!listening) return;
+  const level = rms();
+  // don't record while JARVIS is talking or while a request is in flight
+  if(speaking || busy){ if(recording) stopRec(); requestAnimationFrame(loop); return; }
+  if(!recording){
+    if(level > START_RMS){ speechFrames++; if(speechFrames>=2){ startRec(); speechFrames=0; } }
+    else speechFrames=0;
+  } else {
+    if(level > START_RMS){ silenceStart=0; }
+    else {
+      if(!silenceStart) silenceStart=performance.now();
+      else if(performance.now()-silenceStart > SILENCE_MS) stopRec();
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+async function start(){
+  try { stream = await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(e){ statusEl.textContent='Mic access denied.'; return; }
+  mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
+  ac = new (window.AudioContext||window.webkitAudioContext)();
+  const srcNode = ac.createMediaStreamSource(stream);
+  analyser = ac.createAnalyser(); analyser.fftSize = 512;
+  srcNode.connect(analyser); data = new Uint8Array(analyser.fftSize);
+  listening=true; micBtn.textContent='STOP'; micBtn.classList.add('on');
+  statusEl.textContent='Armed. Say "Jarvis" anytime.';
+  loop();
+}
+function stop(){
+  listening=false; if(recording) stopRec();
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  if(ac && ac.state!=='closed') ac.close();
+  micBtn.textContent='START'; micBtn.classList.remove('on');
+  statusEl.textContent='Stopped. Click the mic to start.';
+}
+micBtn.onclick = ()=> listening ? stop() : start();
+</script>
+</body>
+</html>

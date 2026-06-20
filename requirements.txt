@@ -1,0 +1,32 @@
+# Core voice loop (Phase 1-2)
+faster-whisper
+openwakeword
+sounddevice
+numpy
+soundfile
+ollama
+psutil
+pyautogui
+pyttsx3
+pillow
+
+# Phone bridge (Phase 4) - install when needed
+python-telegram-bot
+
+# Wake word engine (highly recommended)
+pvporcupine       # accurate wake word — pip install pvporcupine, free key at console.picovoice.ai
+
+# Beast upgrades (installed)
+piper-tts          # better TTS voice (needs a voice file in voices/)
+chromadb           # RAG vector store
+pypdf              # read PDFs for RAG
+requests           # weather + web fetch
+beautifulsoup4     # web page text extraction
+pytesseract        # screen OCR (needs Tesseract-OCR installed)
+pyperclip          # clipboard access
+edge-tts           # realistic Microsoft neural TTS voice
+chatterbox-tts     # reference-audio voice cloning engine
+openvoice-cli      # tone-color voice conversion engine
+torch==2.6.0       # chatterbox-compatible torch build
+torchaudio==2.6.0
+torchvision==0.21.0
