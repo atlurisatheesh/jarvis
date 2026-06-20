@@ -133,18 +133,31 @@ class Mouth:
             "--out",
             media_path,
         ]
+        clone_proc = None
         try:
-            subprocess.run(
+            # Keep the clone worker under the same interruption controller as
+            # media playback. Previously subprocess.run() was invisible to
+            # stop(), so old clone jobs survived a new command and played late.
+            clone_proc = subprocess.Popen(
                 cmd,
                 cwd=str(config.BASE_DIR.parent),
-                capture_output=True,
                 text=True,
-                timeout=config.CLONE_TTS_TIMEOUT_SECONDS,
-                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            with self._lock:
+                self._proc = clone_proc
+            stdout, stderr = clone_proc.communicate(timeout=config.CLONE_TTS_TIMEOUT_SECONDS)
+            if clone_proc.returncode:
+                raise subprocess.CalledProcessError(
+                    clone_proc.returncode, cmd, output=stdout, stderr=stderr
+                )
             seconds = max(2.0, min(30.0, len(safe_text.split()) / 2.4 + 0.8))
             self._play_media_file(media_path, seconds)
         except Exception as e:
+            if isinstance(e, subprocess.TimeoutExpired) and clone_proc:
+                clone_proc.kill()
+                clone_proc.communicate()
             try:
                 os.unlink(media_path)
             except OSError:
@@ -154,6 +167,10 @@ class Mouth:
             else:
                 print(f"[mouth] clone TTS unavailable ({e}); using Edge neural voice")
                 self._speak_edge(safe_text)
+        finally:
+            with self._lock:
+                if self._proc is clone_proc:
+                    self._proc = None
 
     def _speak_hf(self, text: str):
         safe_text = text.encode("ascii", "ignore").decode("ascii")
