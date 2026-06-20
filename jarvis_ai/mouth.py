@@ -59,6 +59,11 @@ class Mouth:
                     self.engine.stop()
                 except Exception:
                     pass
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
 
     def is_speaking(self) -> bool:
         return self._speak_thread is not None and self._speak_thread.is_alive()
@@ -96,29 +101,21 @@ class Mouth:
                 self._proc = None
 
     def _play_media_file(self, media_path: str, seconds: float):
-        escaped = media_path.replace("'", "''")
-        ps = (
-            "Add-Type -AssemblyName PresentationCore; "
-            "$p = New-Object System.Windows.Media.MediaPlayer; "
-            f"$p.Open([Uri]'{escaped}'); "
-            "$p.Play(); "
-            f"Start-Sleep -Milliseconds {int(seconds * 1000)}; "
-            "$p.Stop(); $p.Close(); "
-            f"Remove-Item -LiteralPath '{escaped}' -ErrorAction SilentlyContinue"
-        )
-        with self._lock:
-            self._stop_event.clear()
-            self._proc = subprocess.Popen(
-                ["powershell", "-Command", ps],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+        """Play generated audio in-process so stale PowerShell players cannot overlap."""
         try:
-            self._proc.wait(timeout=seconds + 5)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
-        finally:
+            import sounddevice as sd
+            import soundfile as sf
+
+            audio, sample_rate = sf.read(media_path, dtype="float32", always_2d=True)
             with self._lock:
-                self._proc = None
+                self._stop_event.clear()
+            sd.play(audio, sample_rate, device=config.OUTPUT_DEVICE)
+            sd.wait()
+        finally:
+            try:
+                os.unlink(media_path)
+            except OSError:
+                pass
 
     def _speak_clone(self, text: str):
         safe_text = text.encode("ascii", "ignore").decode("ascii")
