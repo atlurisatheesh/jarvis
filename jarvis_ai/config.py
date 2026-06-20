@@ -50,6 +50,7 @@ BRAIN_KEEP_ALIVE = "30m"
 ASSISTANT_NAME = "Leha"
 USER_NAME = "Sir"
 ASSISTANT_MODE = "ultra"
+LEHA_BUILD = "2026.06.20-rate-limit-local-fallback"
 
 SYSTEM_PROMPT = (
     "You are Leha, a capable voice assistant on the user's Windows laptop. "
@@ -196,6 +197,22 @@ TELEGRAM_TOKEN = _load_secret("JARVIS_TG_TOKEN", ".tg_token")
 # Your numeric Telegram user id(s) from @userinfobot. Empty list = allow anyone
 # (NOT recommended — anyone who finds the bot could control your laptop).
 TELEGRAM_ALLOWED_USERS = []
+
+# --- Web app (PWA) access PIN ---
+# Phone must enter this PIN once to use the web app. Auto-generated 6-digit on
+# first run, saved to .web_pin (gitignored). Override via env LEHA_WEB_PIN.
+def _load_or_make_pin() -> str:
+    p = _load_secret("LEHA_WEB_PIN", ".web_pin")
+    if p:
+        return p
+    import secrets
+    pin = f"{secrets.randbelow(900000) + 100000}"
+    try:
+        (BASE_DIR.parent / ".web_pin").write_text(pin, encoding="utf-8")
+    except Exception:
+        pass
+    return pin
+WEB_PIN = _load_or_make_pin()
 
 # --- Gmail personal context (IMAP, stdlib) ---
 # App password (NOT your login password) from https://myaccount.google.com/apppasswords

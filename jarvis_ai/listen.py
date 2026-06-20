@@ -67,7 +67,10 @@ def _play_earcon(kind: str):
 
 class LehaSession:
     def __init__(self):
-        print(f"Loading {config.ASSISTANT_NAME} (Ultra Beat Mode)...")
+        print(
+            f"Loading {config.ASSISTANT_NAME} (Ultra Beat Mode, "
+            f"build {config.LEHA_BUILD})..."
+        )
         self.ears = Ears()
         self.brain = Brain()
         self.mouth = Mouth()
