@@ -13,6 +13,7 @@ from jarvis_ai import assistant_core
 from jarvis_ai.assistant_session import AssistantSession
 from jarvis_ai.brain import Brain, _GroqRateLimited
 from jarvis_ai.ears import Ears
+from jarvis_ai.mouth import Mouth
 from jarvis_ai.skills import phone
 
 
@@ -71,6 +72,17 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertEqual(result.ignored_reason, "no wake trigger")
         self.assertFalse(self.calls)
 
+    def test_unaddressed_background_speech_cannot_run_tools(self):
+        result = self.session().handle("lead generation", lambda _: "brain should not run")
+        self.assertEqual(result.ignored_reason, "no wake trigger")
+        self.assertFalse(self.calls)
+
+    def test_zero_followup_mode_requires_wake_for_each_turn(self):
+        session = AssistantSession(followup_seconds=0)
+        session.activate()
+        result = session.handle("what time is it", lambda _: "brain should not run")
+        self.assertEqual(result.ignored_reason, "no wake trigger")
+
     def test_phone_skill_builds_adb_commands_without_running_adb(self):
         commands: list[tuple[str, ...]] = []
         with patch("jarvis_ai.skills.phone._adb", side_effect=lambda *args, **_: commands.append(args) or "ok"):
@@ -82,8 +94,21 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertEqual(commands[2], ("shell", "input", "keyevent", "KEYCODE_HOME"))
 
     def test_voice_configuration_is_loadable(self):
-        self.assertEqual(config.TTS_ENGINE, "edge")
-        self.assertTrue(config.EDGE_TTS_VOICE)
+        self.assertIn(config.TTS_ENGINE, {"edge", "powershell"})
+        self.assertTrue(config.POWERSHELL_TTS_VOICE)
+
+    def test_health_command_is_local_and_safe(self):
+        with patch("jarvis_ai.health.voice_summary", return_value="Health: microphone ready."):
+            result = self.session().handle("Leha health", lambda _: "brain should not run")
+        self.assertTrue(result.acted)
+        self.assertEqual(result.reply, "Health: microphone ready.")
+        self.assertFalse(self.calls)
+
+    def test_new_speech_generation_invalidates_stale_audio(self):
+        mouth = Mouth()
+        generation = mouth._active_generation()
+        mouth.stop()
+        self.assertFalse(mouth._is_current(generation))
 
     def test_rate_limit_uses_local_brain_instead_of_spoken_error(self):
         class RateLimitedGroq:
@@ -105,8 +130,36 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertEqual(Brain.ask(brain, "hello"), "slow local reply")
         self.assertTrue(local.called)
 
+    def test_failed_cloud_provider_is_skipped_during_cooldown(self):
+        class FailedCloud:
+            provider_name = "groq"
+
+            def __init__(self):
+                self.calls = 0
+
+            def ask(self, _text):
+                self.calls += 1
+                raise _GroqRateLimited("test")
+
+        class LocalFallback:
+            def ask(self, _text):
+                return "local reply"
+
+        cloud = FailedCloud()
+        brain = Brain.__new__(Brain)
+        brain._cloudflare = None
+        brain._groq = cloud
+        brain._openai = None
+        brain._local = LocalFallback()
+        brain._cooldowns = {}
+        self.assertEqual(Brain.ask(brain, "first"), "local reply")
+        self.assertEqual(Brain.ask(brain, "second"), "local reply")
+        self.assertEqual(cloud.calls, 1)
+
     def test_voice_capture_allows_a_natural_pause(self):
-        self.assertGreaterEqual(config.SILENCE_MS, 600)
+        # Voice turns should remain natural but not add nearly half a second of
+        # unnecessary latency before cloud transcription begins.
+        self.assertGreaterEqual(config.SILENCE_MS, 300)
 
     def test_barge_in_is_disabled_without_echo_cancellation(self):
         self.assertFalse(config.BARGE_IN_ENABLED)

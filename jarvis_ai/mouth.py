@@ -8,6 +8,7 @@ import time
 import sys
 import numpy as np
 from . import config
+from .runtime_state import runtime
 
 
 class Mouth:
@@ -16,6 +17,7 @@ class Mouth:
         self._proc = None
         self._stop_event = threading.Event()
         self._speak_thread = None
+        self._generation = 0
         self.engine_name = config.TTS_ENGINE
         if self.engine_name == "piper":
             self._init_piper()
@@ -47,6 +49,7 @@ class Mouth:
     def stop(self):
         """Interrupt any ongoing speech immediately."""
         with self._lock:
+            self._generation += 1
             self._stop_event.set()
             if self._proc:
                 try:
@@ -72,6 +75,14 @@ class Mouth:
         if self._speak_thread:
             self._speak_thread.join(timeout=timeout)
 
+    def _active_generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def _is_current(self, generation: int | None) -> bool:
+        with self._lock:
+            return generation is None or generation == self._generation
+
     def _speak_powershell(self, text: str):
         safe_text = text.encode("ascii", "ignore").decode("ascii")
         escaped = safe_text.replace("'", "''")
@@ -89,7 +100,9 @@ class Mouth:
         with self._lock:
             self._stop_event.clear()
             self._proc = subprocess.Popen(
-                ["powershell", "-Command", ps],
+                # WPF MediaPlayer requires an STA apartment. Without -STA the
+                # Edge MP3 is generated but may play silently on Windows.
+                ["powershell", "-NoProfile", "-STA", "-Command", ps],
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
         try:
@@ -116,6 +129,52 @@ class Mouth:
                 os.unlink(media_path)
             except OSError:
                 pass
+
+    def _play_edge_file(self, media_path: str, seconds: float, generation: int | None = None):
+        """Play Edge MP3 through Windows' active speaker/headphone route."""
+        if not self._is_current(generation):
+            try:
+                os.unlink(media_path)
+            except OSError:
+                pass
+            return
+        escaped = media_path.replace("'", "''")
+        ps = (
+            "Add-Type -AssemblyName PresentationCore; "
+            "$p = New-Object System.Windows.Media.MediaPlayer; "
+            f"$p.Open([Uri]'{escaped}'); "
+            "$deadline = (Get-Date).AddSeconds(3); "
+            "while (-not $p.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $deadline) "
+            "{ Start-Sleep -Milliseconds 50 }; "
+            f"$fallbackMs = {int(seconds * 1000)}; "
+            "$playMs = if ($p.NaturalDuration.HasTimeSpan) "
+            "{ [Math]::Ceiling($p.NaturalDuration.TimeSpan.TotalMilliseconds) + 500 } "
+            "else { $fallbackMs }; "
+            "$p.Play(); Start-Sleep -Milliseconds $playMs; "
+            "$p.Stop(); $p.Close(); "
+            f"Remove-Item -LiteralPath '{escaped}' -ErrorAction SilentlyContinue"
+        )
+        with self._lock:
+            if generation is not None and generation != self._generation:
+                try:
+                    os.unlink(media_path)
+                except OSError:
+                    pass
+                return
+            self._stop_event.clear()
+            proc = subprocess.Popen(
+                ["powershell", "-Command", ps],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            self._proc = proc
+        try:
+            proc.wait(timeout=seconds + 5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        finally:
+            with self._lock:
+                if self._proc is proc:
+                    self._proc = None
 
     def _speak_clone(self, text: str):
         safe_text = text.encode("ascii", "ignore").decode("ascii")
@@ -219,7 +278,7 @@ class Mouth:
             if config.HF_TTS_FALLBACK_TO_EDGE:
                 self._speak_edge(safe_text)
 
-    def _speak_edge(self, text: str):
+    def _speak_edge(self, text: str, generation: int | None = None):
         safe_text = text.encode("ascii", "ignore").decode("ascii")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
             media_path = f.name
@@ -234,6 +293,7 @@ class Mouth:
             )
             await communicate.save(media_path)
 
+        generated_started = time.perf_counter()
         try:
             asyncio.run(_save())
         except Exception as e:
@@ -245,8 +305,19 @@ class Mouth:
             self._speak_powershell(safe_text)
             return
 
-        seconds = max(2.0, min(30.0, len(safe_text.split()) / 2.4 + 0.8))
-        self._play_media_file(media_path, seconds)
+        runtime.timing("tts_generate", (time.perf_counter() - generated_started) * 1000)
+
+        if not self._is_current(generation):
+            try:
+                os.unlink(media_path)
+            except OSError:
+                pass
+            return
+
+        # Fallback only when MediaPlayer cannot read MP3 duration. Bias long so
+        # an answer is never cut off mid-sentence during a slow audio startup.
+        seconds = max(3.0, min(60.0, len(safe_text.split()) / 1.6 + 2.0))
+        self._play_edge_file(media_path, seconds, generation)
 
     def _say_piper(self, text: str):
         import numpy as np
@@ -304,7 +375,7 @@ class Mouth:
                     else:
                         # Wait for previous chunk to finish before queuing next
                         self.join(timeout=15)
-                    self._start_tts_thread(chunk)
+                    self._start_tts_thread(chunk, self._active_generation())
 
         if buffer.strip():
             chunk = buffer.strip()
@@ -314,16 +385,16 @@ class Mouth:
                 self.stop()
             else:
                 self.join(timeout=15)
-            self._start_tts_thread(chunk)
+            self._start_tts_thread(chunk, self._active_generation())
 
         return full_text
 
-    def _start_tts_thread(self, text: str):
+    def _start_tts_thread(self, text: str, generation: int | None = None):
         """Launch TTS for one chunk in a background thread (non-interrupting)."""
         import threading
         if self.engine_name == "edge":
             self._speak_thread = threading.Thread(
-                target=self._speak_edge, args=(text,), daemon=True
+                target=self._speak_edge, args=(text, generation), daemon=True
             )
         elif self.engine_name == "clone":
             self._speak_thread = threading.Thread(
@@ -354,6 +425,7 @@ class Mouth:
         print(f"{config.ASSISTANT_NAME}: {safe_text}")
         # interrupt any previous speech
         self.stop()
+        generation = self._active_generation()
         if self.engine_name == "piper":
             self._speak_thread = threading.Thread(
                 target=self._say_piper, args=(safe_text,), daemon=True
@@ -371,7 +443,7 @@ class Mouth:
             self._speak_thread.start()
         elif self.engine_name == "edge":
             self._speak_thread = threading.Thread(
-                target=self._speak_edge, args=(safe_text,), daemon=True
+                target=self._speak_edge, args=(safe_text, generation), daemon=True
             )
             self._speak_thread.start()
         elif self.engine_name == "pyttsx3":

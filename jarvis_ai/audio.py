@@ -38,10 +38,23 @@ def resolve_device(spec):
     return matches[0][0]
 
 
+def _capture_rates(dev):
+    """Try 16 kHz first, then the driver-advertised rate for unstable devices."""
+    rates = [config.SAMPLE_RATE]
+    if dev is not None:
+        try:
+            rates.append(int(sd.query_devices(dev)["default_samplerate"]))
+        except Exception:
+            pass
+    return list(dict.fromkeys(rates))
+
+
 def record_command(max_seconds=10, silence_ms=900, start_rms=200) -> np.ndarray:
     """Record from the configured mic until silence; return 16 kHz int16 mono."""
     dev = resolve_device(config.MIC_DEVICE)
-    native = int(sd.query_devices(dev)["default_samplerate"]) if dev is not None else 16000
+    # This microphone rejects a 16 kHz input stream but accepts its native
+    # 48 kHz rate. Capture natively, then resample below for STT.
+    native = _capture_rates(dev)[-1]
     block = max(160, int(native * 0.05))  # ~50 ms
     chunk_ms = block / native * 1000.0
     silence_need = max(1, int(silence_ms / chunk_ms))
@@ -132,23 +145,26 @@ def stream_utterances(should_mute=None, barge_in_active=None, silence_ms=900,
     interruptions during TTS. Raises the VAD threshold instead of muting.
     """
     dev = resolve_device(config.MIC_DEVICE)
-    native = int(sd.query_devices(dev)["default_samplerate"]) if dev is not None else 16000
-    block = max(160, int(native * 0.05))   # ~50 ms
-    chunk_ms = block / native * 1000.0
-    silence_need = max(1, int(silence_ms / chunk_ms))
-    max_blocks = int(max_seconds * 1000 / chunk_ms)
-
-    q: queue.Queue = queue.Queue()
-
-    def cb(indata, frames, t, s):
-        q.put(indata.copy())
-
-    pre = collections.deque(maxlen=3)
-    frames, started, silent = [], False, 0
-
-    with sd.InputStream(samplerate=native, channels=1, blocksize=block,
-                        dtype="int16", device=dev, callback=cb):
-        while True:
+    last_error = None
+    for native in _capture_rates(dev):
+        block = max(160, int(native * 0.05))
+        chunk_ms = block / native * 1000.0
+        silence_need = max(1, int(silence_ms / chunk_ms))
+        max_blocks = int(max_seconds * 1000 / chunk_ms)
+        q: queue.Queue = queue.Queue()
+        def cb(indata, frames, t, s): q.put(indata.copy())
+        pre = collections.deque(maxlen=3)
+        frames, started, silent = [], False, 0
+        try:
+            stream = sd.InputStream(samplerate=native, channels=1, blocksize=block,
+                                    dtype="int16", device=dev, callback=cb)
+            stream.start()
+        except Exception as exc:
+            last_error = exc
+            continue
+        print(f"[audio] capture rate {native} Hz", flush=True)
+        try:
+          while True:
             f = q.get().flatten().astype(np.float32)
 
             # barge-in mode: keep stream alive but require louder audio
@@ -191,26 +207,27 @@ def stream_utterances(should_mute=None, barge_in_active=None, silence_ms=900,
                         out = _to16k_int16(audio, native)
                         if len(out) >= min_samples:
                             yield out
+        finally:
+            stream.stop(); stream.close()
+    raise RuntimeError(f"Could not open microphone: {last_error}")
 
 
 def calibrate_noise_floor(dev=None, seconds=1.5):
     """Measure background RMS on the mic to set a dynamic VAD threshold."""
     if dev is None:
         dev = resolve_device(config.MIC_DEVICE)
-    native = int(sd.query_devices(dev)["default_samplerate"]) if dev is not None else 16000
-    block = max(160, int(native * 0.05))
-    q: queue.Queue = queue.Queue()
-
-    def cb(indata, frames, t, s):
-        q.put(indata.copy())
-
-    samples = []
-    with sd.InputStream(samplerate=native, channels=1, blocksize=block,
-                        dtype="int16", device=dev, callback=cb):
-        needed = int(seconds * native / block)
-        for _ in range(needed):
-            f = q.get().flatten().astype(np.float32)
-            samples.append(f)
-    audio = np.concatenate(samples)
-    rms = float(np.sqrt(np.mean(audio ** 2)))
-    return max(50.0, rms)
+    last_error = None
+    for native in _capture_rates(dev):
+        block = max(160, int(native * 0.05))
+        q: queue.Queue = queue.Queue()
+        def cb(indata, frames, t, s): q.put(indata.copy())
+        try:
+            with sd.InputStream(samplerate=native, channels=1, blocksize=block,
+                                dtype="int16", device=dev, callback=cb):
+                samples = [q.get().flatten().astype(np.float32)
+                           for _ in range(int(seconds * native / block))]
+            audio = np.concatenate(samples)
+            return max(50.0, float(np.sqrt(np.mean(audio ** 2))))
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Could not calibrate microphone: {last_error}")

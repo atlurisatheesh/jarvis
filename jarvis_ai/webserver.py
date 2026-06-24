@@ -41,8 +41,11 @@ def _route(text: str):
     """Full pipeline: reflexes first, then brain. Same as voice listener.
 
     Every web/phone message is an explicit command, so activate the session
-    (no wake word needed over the network).
+    (no wake word needed over the network). Marked 'remote' so shell and
+    destructive tools are refused even if the brain calls them.
     """
+    from . import skills as _skills
+    _skills.set_origin("remote")
     session.activate()
     result = session.handle(text, brain.ask)
     if result.ignored_reason and not result.reply:
@@ -73,6 +76,12 @@ def service_worker():
 def icon():
     return Response((_WEB_DIR / "icon.svg").read_text(encoding="utf-8"),
                     media_type="image/svg+xml")
+
+
+@app.get("/api/health")
+def health():
+    from . import health as _h
+    return JSONResponse(_h.check())
 
 
 @app.post("/api/auth")

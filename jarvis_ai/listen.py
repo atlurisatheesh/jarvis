@@ -16,6 +16,7 @@ Features:
 - Audio earcons: startup / wake / error beeps.
 - Fast local reflexes: media, volume, time, weather, open/close handled without LLM.
 """
+import threading
 import time
 try:
     import winsound
@@ -27,26 +28,62 @@ from . import config
 from . import speaker_profile
 from . import wake_porcupine
 from . import wake_openwakeword
+from . import wake_local_onnx
 from .assistant_core import set_last_reply
 from .assistant_session import AssistantSession
 from .audio import calibrate_noise_floor, stream_utterances
 from .brain import Brain
 from .ears import Ears
 from .mouth import Mouth
+from .runtime_state import runtime
 from .scheduler import Scheduler
 from .wake_phrases import has_trigger, is_hallucination, normalize_text
 
+# Phase 2/3 modules: lazily wired when their config flags are enabled.
+try:
+    from . import latency_budget
+except Exception:
+    latency_budget = None  # type: ignore[assignment]
+try:
+    from . import speech_manager
+except Exception:
+    speech_manager = None  # type: ignore[assignment]
+
 
 def _morning_brief(mouth):
-    from .skills import farm, reminders
+    from . import skills
 
     bits = [f"Good morning, Sir. It is {datetime.now():%I:%M %p}."]
+    # weather
     try:
-        bits.append(farm.get_weather())
+        bits.append(skills.run_tool("get_weather", {}))
     except Exception:
         pass
-    bits.append(reminders.list_reminders())
-    mouth.say(" ".join(bits))
+    # today's calendar (Google, if connected)
+    try:
+        cal = skills.run_tool("google_calendar_upcoming", {"days": 1})
+        if cal and "No upcoming" not in cal and "not connected" not in cal.lower():
+            bits.append(cal)
+    except Exception:
+        pass
+    # unread email count (Google OAuth, if connected)
+    try:
+        mail = skills.run_tool("google_gmail_search", {"query": "is:unread", "limit": 3})
+        if mail and "No matching" not in mail:
+            bits.append("Unread " + mail)
+    except Exception:
+        pass
+    # battery / system
+    try:
+        bits.append(skills.run_tool("system_info", {}))
+    except Exception:
+        pass
+    # reminders
+    try:
+        bits.append(skills.run_tool("list_reminders", {}))
+    except Exception:
+        pass
+    mouth.say(" ".join(b for b in bits if b))
 
 
 def _play_earcon(kind: str):
@@ -74,19 +111,31 @@ class LehaSession:
         self.ears = Ears()
         self.brain = Brain()
         self.mouth = Mouth()
+        # Phase 3: central speech queue wraps the Mouth TTS generator when
+        # enabled. Falls back to raw Mouth when disabled or unavailable.
+        self.speech = (speech_manager.get_manager(self.mouth)
+                       if config.SPEECH_MANAGER_ENABLED and speech_manager is not None
+                       else self.mouth)
+        # Phase 2: shared latency budget for per-stage overrun tracking.
+        self._budget = (latency_budget.get_latency_budget()
+                        if latency_budget is not None else None)
         self.scheduler = Scheduler(
-            # All replies must share the same speech controller. A second Mouth
-            # instance can overlap audio with a command response or briefing.
-            mouth=self.mouth,
-            brief_callback=lambda: _morning_brief(self.mouth),
+            # All replies must share the same speech controller. Routing the
+            # scheduler and morning brief through self.speech (the central
+            # SpeechManager when enabled) instead of the raw Mouth prevents a
+            # reminder/briefing from overlapping a command response.
+            mouth=self.speech,
+            brief_callback=lambda: _morning_brief(self.speech),
         )
         self.scheduler.start()
         self.session = AssistantSession()
         self.start_rms = config.SILENCE_RMS + 100
         self.noise_floor = 0.0
         self._quit = False
+        self._heartbeat_stop = threading.Event()
 
     def calibrate(self):
+        runtime.set("calibrating")
         print("[calibrate] measuring noise floor...", flush=True)
         try:
             self.noise_floor = calibrate_noise_floor(seconds=config.VAD_CALIBRATION_SECONDS)
@@ -100,23 +149,46 @@ class LehaSession:
         if not text:
             return
         set_last_reply(text)
-        self.mouth.say(text)
+        runtime.set("speaking")
+        self.speech.say(text)
+
+    def _heartbeat_loop(self):
+        while not self._heartbeat_stop.wait(config.HEARTBEAT_SECONDS):
+            snapshot = runtime.snapshot()
+            state = "speaking" if self.speech.is_speaking() else snapshot["state"]
+            print(
+                f"[heartbeat] state={state} turns={snapshot['turns']} "
+                f"age={snapshot['age_seconds']}s",
+                flush=True,
+            )
 
     def _handle_audio(self, audio, *, force_active: bool = False) -> bool:
         """Transcribe + handle one utterance. Returns True if quit requested."""
+        turn_started = time.perf_counter()
+        runtime.begin_turn()
         try:
+            runtime.set("transcribing")
+            stt_started = time.perf_counter()
             text = self.ears.transcribe_int16(audio).strip()
+            stt_elapsed = (time.perf_counter() - stt_started) * 1000
+            runtime.timing("stt", stt_elapsed)
+            if self._budget:
+                try:
+                    self._budget.record("stt", stt_elapsed / 1000)
+                except Exception:
+                    pass
             if not text:
+                runtime.set("idle")
                 return False
             print(f"[debug] heard: '{text}'", flush=True)
             low = normalize_text(text)
 
             # With barge-in enabled, the mic remains available while Leha is
             # speaking. A wake word or an explicit stop cancels speech first.
-            if self.mouth.is_speaking() and config.BARGE_IN_ENABLED:
+            if self.speech.is_speaking() and config.BARGE_IN_ENABLED:
                 if has_trigger(text) or low in {"stop", "pause", "cancel", "nevermind"}:
                     print("[barge-in] interrupting TTS...", flush=True)
-                    self.mouth.stop()
+                    self.speech.stop()
                     time.sleep(0.12)
 
             # Speaker enrollment
@@ -146,6 +218,7 @@ class LehaSession:
             result = self.session.handle(text, _ask_streaming_tracked)
             if result.ignored_reason:
                 print(f"[debug] ignored: {result.ignored_reason}", flush=True)
+                runtime.set("idle")
                 return False
 
             print(f"You: {result.heard}", flush=True)
@@ -155,17 +228,32 @@ class LehaSession:
                     self.mouth.join(timeout=30)
                 else:
                     # local reflex reply — speak it normally
+                    runtime.provider("local_reflex")
                     self._say(result.reply)
+            runtime.turn_completed()
+            dispatch_elapsed = (time.perf_counter() - turn_started) * 1000
+            runtime.timing("turn_dispatch", dispatch_elapsed)
+            if self._budget:
+                try:
+                    self._budget.record("turn_dispatch", dispatch_elapsed / 1000)
+                except Exception:
+                    pass
+            print(runtime.latency_line(), flush=True)
+            if not self.speech.is_speaking():
+                runtime.set("idle")
             return result.quit_requested
 
         except Exception as e:
             print(f"[error] {e}", flush=True)
+            runtime.error(str(e)[:160])
             _play_earcon("error")
             return False
 
     def _ask_streaming(self, text: str) -> str:
         """Brain ask via streaming + sentence-level TTS for lowest perceived latency."""
+        runtime.set("thinking")
         token_gen = self.brain.ask_stream(text)
+        runtime.set("speaking")
         spoken = self.mouth.say_stream(token_gen)
         return spoken  # return full text so session can store it
 
@@ -176,7 +264,7 @@ class LehaSession:
         print(f"[wake/{engine_name}] active.", flush=True)
         try:
             for event in listener.stream_utterances(
-                should_mute=self.mouth.is_speaking,
+                should_mute=self.speech.is_speaking,
                 silence_ms=config.SILENCE_MS,
                 max_seconds=config.MAX_COMMAND_SECONDS,
                 min_samples=6000,
@@ -186,13 +274,14 @@ class LehaSession:
                     break
                 if event is None:
                     # Wake word detected
-                    if self.mouth.is_speaking():
+                    if self.speech.is_speaking():
                         print("[barge-in] interrupting TTS...", flush=True)
-                        self.mouth.stop()
+                        self.speech.stop()
                         time.sleep(0.15)
                     _play_earcon("wake")
-                    self._say("Yes, Sir?")
-                    self.mouth.join(timeout=3.0)
+                    if config.SPEAK_WAKE_ACK:
+                        self._say("Ready.")
+                        self.speech.join(timeout=3.0)
                     self.session.activate()
                 else:
                     if self._handle_audio(event, force_active=True):
@@ -236,7 +325,7 @@ class LehaSession:
 
         try:
             for audio in stream_utterances(
-                should_mute=(lambda: self.mouth.is_speaking() and not config.BARGE_IN_ENABLED),
+                should_mute=(lambda: self.speech.is_speaking() and not config.BARGE_IN_ENABLED),
                 barge_in_active=self.mouth.is_speaking if config.BARGE_IN_ENABLED else None,
                 start_rms=self.start_rms,
                 silence_ms=config.SILENCE_MS,
@@ -254,21 +343,44 @@ class LehaSession:
     # ── Entry point ───────────────────────────────────────────────────
 
     def run(self):
-        self.calibrate()
-        _play_earcon("startup")
-        self._say(f"{config.ASSISTANT_NAME} online.")
+        heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        heartbeat.start()
+        recovery_attempts = 0
+        try:
+            self.calibrate()
+            _play_earcon("startup")
+            self._say(f"{config.ASSISTANT_NAME} online.")
 
-        if wake_porcupine.is_available():
-            print("[wake] engine: Porcupine (high accuracy)", flush=True)
-            self._run_porcupine()
-        elif wake_openwakeword.is_available():
-            print("[wake] engine: openwakeword (offline, no signup)", flush=True)
-            self._run_oww()
-        else:
-            self._run_whisper_fallback()
-
-        print(f"{config.ASSISTANT_NAME} offline.")
-        self.mouth.stop()
+            while not self._quit:
+                try:
+                    runtime.set("idle")
+                    if wake_porcupine.is_available():
+                        print("[wake] engine: Porcupine (high accuracy)", flush=True)
+                        self._run_porcupine()
+                    elif wake_local_onnx.is_available():
+                        print("[wake] engine: private local Leha model", flush=True)
+                        self._run_wake_engine(wake_local_onnx.LocalOnnxWakeListener(), "local")
+                    elif wake_openwakeword.is_available():
+                        print("[wake] engine: openwakeword (offline, no signup)", flush=True)
+                        self._run_oww()
+                    else:
+                        self._run_whisper_fallback()
+                    if not self._quit:
+                        raise RuntimeError("microphone loop ended unexpectedly")
+                except KeyboardInterrupt:
+                    self._quit = True
+                except Exception as exc:
+                    recovery_attempts += 1
+                    delay = min(config.MIC_RECOVERY_MAX_SECONDS, 2 ** min(recovery_attempts, 4))
+                    runtime.error(f"microphone recovery: {exc}")
+                    print(f"[audio] loop failed: {exc}; retrying in {delay}s", flush=True)
+                    time.sleep(delay)
+                    self.calibrate()
+        finally:
+            self._heartbeat_stop.set()
+            runtime.set("offline")
+            print(f"{config.ASSISTANT_NAME} offline.")
+            self.mouth.stop()
 
 
 def main():

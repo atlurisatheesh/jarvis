@@ -7,6 +7,7 @@ Uses the proven native-rate capture path. Say 'quit' or Ctrl+C to exit.
 """
 from . import config
 from .audio import record_command
+from .assistant_session import AssistantSession
 from .brain import Brain
 from .ears import Ears
 from .mouth import Mouth
@@ -19,6 +20,7 @@ def main():
     ears = Ears()
     brain = Brain()
     mouth = Mouth()
+    session = AssistantSession(followup_seconds=60)
     mouth.say(f"{config.ASSISTANT_NAME} ready. Press enter, then speak.")
     while True:
         try:
@@ -35,8 +37,12 @@ def main():
         if text.lower().strip(" .!?") in _STOP:
             mouth.say("Goodbye, Sir.")
             break
-        reply = brain.ask(text)
-        mouth.say(reply)
+        # Push-to-talk is intentionally always active, but it must still use
+        # the same local fast-path as the always-on assistant.
+        session.activate()
+        result = session.handle(text, brain.ask)
+        if result.reply:
+            mouth.say(result.reply)
     print("JARVIS offline.")
 
 

@@ -4,6 +4,13 @@ Whisper doesn't know "Leha" — it's not in its training data. So we use:
   1. A large set of known Whisper manglings as exact triggers
   2. A phonetic similarity function that catches NEW manglings automatically
   3. Heavy Whisper prompt bias in ears.py to steer toward "Leha"
+
+When the dedicated ONNX Leha wake detector (:data:`config.CUSTOM_WAKE_ENABLED`)
+is the *primary* wake engine, transcript matching is only a fallback. In that
+case :func:`strict_mode` is True and :func:`has_trigger` drops the broad,
+aggressive fuzzy aliases (like "lena", "layla", soundex L200) that are prone
+to false wakes. The high-precision triggers and the strongest phonetic match
+remain so the transcript fallback still catches clear "Leha" speech.
 """
 import string
 from difflib import SequenceMatcher
@@ -29,7 +36,7 @@ TRIGGERS = (
     # exact / greetings
     "hey leha", "hi leha", "ok leha", "okay leha", "hello leha",
     # core variants
-    "leha", "leah", "lea", "liha", "leeha", "layha", "laiha",
+    "leha", "leah", "liha", "leeha", "layha", "laiha",
     "le ha", "lee ha", "lia", "liya", "laya", "leyah", "leya",
     # Whisper manglings observed in real sessions
     "jai maaise", "ja reis", "ja razi", "jaros",
@@ -52,6 +59,55 @@ _TRIGGER_FRAGMENTS = (
     "lehaa", "leia", "lihaa",
     "lena", "lela", "leela", "layla",
 )
+
+# High-precision triggers used in strict mode (dedicated ONNX model is primary).
+# Only the clearest, lowest-false-positive variants are kept. Broad near-misses
+# like "lena"/"layla"/"leela" are dropped because the ONNX detector now handles
+# real wake detection and these only add false triggers in transcript fallback.
+_STRICT_TRIGGERS = (
+    "hey leha", "hi leha", "ok leha", "okay leha", "hello leha",
+    "leha", "leah", "liha", "leeha",
+    "lehah", "lehha", "lehaa",
+    "hey leah", "ok leah", "okay leah",
+)
+
+_STRICT_FRAGMENTS = ("leha", "leah", "leeha", "liha", "lehah", "lehaa")
+
+
+def strict_mode() -> bool:
+    """True when the dedicated ONNX wake detector is the primary engine.
+
+    When True, the transcript fallback tightens its aliases to reduce false
+    wakes, because real wake detection is handled by the trained model.
+    """
+    try:
+        from . import config
+        return bool(getattr(config, "CUSTOM_WAKE_ENABLED", False))
+    except Exception:
+        return False
+
+
+# Precise variants only — no broad near-misses like "layla"/"lena"/"leela".
+_PRECISE_VARIANTS = {
+    "leha", "leah", "liha", "leeha", "lehah", "lehha", "lehaa", "lehe",
+}
+
+
+def _looks_like_leha_strict(word: str) -> bool:
+    """High-precision phonetic check used when the ONNX model is primary.
+
+    Only accepts the clearest "Leha" pronunciations and very close spellings,
+    dropping broad distractors (layla, lena, leela) that add false wakes.
+    """
+    word = word.strip().lower()
+    if word in _PRECISE_VARIANTS:
+        return True
+    if len(word) < 4 or len(word) > 6:
+        return False
+    # Only the strongest similarity to the exact phonemes.
+    return max(
+        SequenceMatcher(None, word, t).ratio() for t in ("leha", "leah", "leeha")
+    ) >= 0.93
 
 # ── Phonetic similarity for unknown manglings ──────────────────────
 
@@ -85,10 +141,15 @@ def _looks_like_leha(word: str) -> bool:
     if len(word) < 3 or len(word) > 8:
         return False
     # Direct prefix check — catches leha, leah, lehah, leeha, etc.
-    if word.startswith(("leh", "lee", "lea", "ley", "lih", "liy", "lay", "lai")):
+    if word in {
+        "leha", "leah", "liha", "leeha", "layha", "laiha", "liya",
+        "laya", "leyah", "leya", "lehah", "lehha", "lehe", "laha",
+        "lahe", "leyha", "leaha", "leeah", "leea", "lehaa", "leia",
+        "liah", "lihaa", "lena", "lela", "leela", "layla",
+    }:
         return True
     # Edit-distance fallback for Whisper near-misses: lena, lela, lehae, etc.
-    if max(SequenceMatcher(None, word, target).ratio() for target in ("leha", "leah", "leeha")) >= 0.72:
+    if max(SequenceMatcher(None, word, target).ratio() for target in ("leha", "leah", "leeha")) >= 0.86:
         return True
     # Soundex match — "Leha" has soundex L000
     sx = _soundex_simple(word)
@@ -143,7 +204,8 @@ def is_hallucination(text: str) -> bool:
         return True
 
     # Very short non-trigger text
-    if len(words) <= 2 and not any(t in low for t in _TRIGGER_FRAGMENTS):
+    fragments = _STRICT_FRAGMENTS if strict_mode() else _TRIGGER_FRAGMENTS
+    if len(words) <= 2 and not any(t in low for t in fragments):
         if len(low) < 5:
             return True
 
@@ -151,13 +213,24 @@ def is_hallucination(text: str) -> bool:
 
 
 def has_trigger(text: str) -> bool:
-    """Check if text contains a fuzzy wake-word match for 'Leha'."""
+    """Check if text contains a fuzzy wake-word match for 'Leha'.
+
+    When :func:`strict_mode` is active (dedicated ONNX detector is primary),
+    only high-precision triggers and a stricter phonetic threshold are used so
+    the transcript fallback does not introduce false wakes.
+    """
     low = normalize_text(text)
+    if strict_mode():
+        if any(t in low for t in _STRICT_TRIGGERS):
+            return True
+        # High-precision phonetic fallback only — no broad aliases.
+        words = low.split()
+        return any(_looks_like_leha_strict(w) for w in words[:2])
     # Check exact triggers first (fast path)
     if any(t in low for t in TRIGGERS):
         return True
     # Check each word phonetically (catches new/unseen manglings)
-    return wake_confidence(low) >= 0.72
+    return wake_confidence(low) >= 0.82
 
 
 def strip_trigger(text: str) -> str:

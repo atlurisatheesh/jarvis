@@ -42,25 +42,27 @@ class AssistantSession:
 
         low = normalize_text(heard)
 
-        # Always allow a very small safe command set before hallucination checks.
-        # Short words like "stop" are valid commands and also look like STT noise.
-        local = handle_local_intent(low, wake_free=config.WAKE_FREE_MEDIA_CONTROLS)
-        if local.handled:
-            if local.keep_active:
-                self.activate()
-            else:
-                self.deactivate()
-            if local.reply:
-                set_last_reply(local.reply)
-            return TurnResult(heard, local.reply, True, local.quit_requested)
-
-        if is_hallucination(heard):
-            return TurnResult(heard, ignored_reason="hallucination")
+        # Never run general local intents before the wake/session gate. Earlier
+        # versions let unrelated room audio trigger calculators, screen tools,
+        # and replies. Only explicit media stop/pause remains wake-free.
+        wake_free_media = {
+            "stop", "pause", "stop music", "pause music",
+            "stop youtube", "pause youtube",
+        }
+        if config.WAKE_FREE_MEDIA_CONTROLS and low in wake_free_media:
+            local = handle_local_intent(low, wake_free=True)
+            if local.handled:
+                if local.reply:
+                    set_last_reply(local.reply)
+                return TurnResult(heard, local.reply, True, local.quit_requested)
 
         triggered = has_trigger(heard)
         active = self.is_active()
         if config.REQUIRE_TRIGGER and not active and not triggered:
             return TurnResult(heard, ignored_reason="no wake trigger")
+
+        if is_hallucination(heard) and not (triggered or active):
+            return TurnResult(heard, ignored_reason="hallucination")
 
         command = strip_trigger(heard) if triggered else low
 

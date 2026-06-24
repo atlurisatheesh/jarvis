@@ -21,6 +21,7 @@ from telegram.ext import (Application, ContextTypes, CommandHandler,
                           MessageHandler, filters)
 
 from . import config
+from . import skills
 from .assistant_session import AssistantSession
 from .brain import Brain
 from .ears import Ears
@@ -43,6 +44,7 @@ def _route(text: str) -> str:
     """Run text through the full reflex+brain pipeline; return the spoken reply."""
     if not text:
         return "I didn't catch that, Sir."
+    skills.set_origin("remote")  # block shell/destructive tools over chat
     session.activate()  # chat messages are always intentional commands
     result = session.handle(text, brain.ask)
     if result.ignored_reason and not result.reply:

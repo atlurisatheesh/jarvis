@@ -1,51 +1,21 @@
-"""Google Maps and OAuth-backed Google personal-data skills."""
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+"""Google Maps and OAuth-backed Google personal-data skills.
+
+Delegates Calendar/Gmail/Drive/Contacts to the dedicated Phase 5 modules
+(``google_calendar``, ``google_gmail``, ``google_drive``, ``google_contacts``)
+which provide enhanced functionality (previews, confirmations, reads).
+"""
 from urllib.parse import urlencode
 import webbrowser
 
-from .. import config
-
-GOOGLE_SCOPES = [
-    "openid",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/contacts.readonly",
-]
-
-
-def _credentials(interactive: bool = False):
-    try:
-        from google.auth.transport.requests import Request
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-    except ImportError:
-        raise RuntimeError("Install Google dependencies with: pip install -r requirements.txt")
-    token_path = Path(config.GOOGLE_TOKEN_FILE)
-    creds = Credentials.from_authorized_user_file(token_path, GOOGLE_SCOPES) if token_path.exists() else None
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    if not creds or not creds.valid:
-        if not interactive:
-            raise RuntimeError("Google is not connected. Run: python -m jarvis_ai.google_auth")
-        flow = InstalledAppFlow.from_client_secrets_file(config.GOOGLE_CREDENTIALS_FILE, GOOGLE_SCOPES)
-        creds = flow.run_local_server(port=0)
-    token_path.write_text(creds.to_json(), encoding="utf-8")
-    return creds
+from .. import google_services
+from .. import google_calendar
+from .. import google_gmail
+from .. import google_drive
+from .. import google_contacts
 
 
 def authorize_google() -> str:
-    if not Path(config.GOOGLE_CREDENTIALS_FILE).exists():
-        return "Google credentials file is missing."
-    _credentials(interactive=True)
-    return "Google account connected."
-
-
-def _service(name: str, version: str):
-    from googleapiclient.discovery import build
-    return build(name, version, credentials=_credentials(), cache_discovery=False)
+    return google_services.authorize_google()
 
 
 def open_google_maps(destination: str, origin: str = "") -> str:
@@ -69,43 +39,83 @@ def search_google_maps(query: str) -> str:
     return f"Searching Google Maps for {query}."
 
 
+# Calendar (Phase 5 — delegated to google_calendar module)
 def google_calendar_upcoming(days: int = 7) -> str:
-    service = _service("calendar", "v3")
-    until = datetime.now(timezone.utc) + timedelta(days=max(1, min(int(days), 30)))
-    events = service.events().list(calendarId="primary", timeMin=datetime.now(timezone.utc).isoformat(),
-        timeMax=until.isoformat(), singleEvents=True, orderBy="startTime", maxResults=5).execute().get("items", [])
-    if not events:
-        return "No upcoming calendar events."
-    return "Upcoming: " + "; ".join(f"{e.get('summary', 'Untitled')} at {e.get('start', {}).get('dateTime', e.get('start', {}).get('date', ''))}" for e in events)
+    return google_calendar.list_upcoming(days)
 
 
+def google_calendar_search(start_date: str, end_date: str = "") -> str:
+    return google_calendar.search_by_date(start_date, end_date)
+
+
+def google_calendar_create(summary: str, start: str, duration_min: int = 60) -> str:
+    """Create a Calendar event. First call previews; the confirmation gate
+    in ``assistant_core`` handles the yes/no flow."""
+    return google_calendar.create(summary, start, duration_min)
+
+
+def google_calendar_delete(event_id: str) -> str:
+    return google_calendar.delete(event_id)
+
+
+# Gmail (Phase 5 — delegated to google_gmail module)
 def google_gmail_search(query: str = "", limit: int = 5) -> str:
-    """Search Gmail through the approved OAuth account, returning message summaries."""
-    service = _service("gmail", "v1")
-    messages = service.users().messages().list(userId="me", q=query, maxResults=max(1, min(int(limit), 10))).execute().get("messages", [])
-    if not messages:
-        return "No matching Gmail messages."
-    rows = []
-    for item in messages:
-        msg = service.users().messages().get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject"]).execute()
-        headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        rows.append(f"{headers.get('from', 'Unknown')}: {headers.get('subject', '(no subject)')}")
-    return "Gmail: " + "; ".join(rows)
+    return google_gmail.search(query, limit)
 
 
+def google_gmail_read(msg_id: str) -> str:
+    """Read the full body of a Gmail message."""
+    return google_gmail.read_message(msg_id)
+
+
+def google_gmail_send(to: str, subject: str, body: str, confirm: bool = False) -> str:
+    """Send an email. First call WITHOUT confirm previews; read it back to the
+    user, then call again with confirm=true after they approve."""
+    if not to.strip():
+        return "Who should I send it to, Sir?"
+    if not confirm:
+        return google_gmail.compose_preview(to, subject, body)
+    return google_gmail.send(to, subject, body)
+
+
+# Drive (Phase 5 — delegated to google_drive module)
 def google_drive_search(query: str) -> str:
-    service = _service("drive", "v3")
-    safe = query.replace("'", "\\'")
-    files = service.files().list(q=f"name contains '{safe}' and trashed = false", pageSize=5,
-        fields="files(id,name,mimeType,modifiedTime)").execute().get("files", [])
-    return "Drive: " + "; ".join(f["name"] for f in files) if files else f"No Drive files matching {query}."
+    return google_drive.search(query)
 
 
+def google_drive_read(file_id: str) -> str:
+    """Read the text content of a Google Doc."""
+    return google_drive.read_document(file_id)
+
+
+def google_drive_recent(count: int = 10) -> str:
+    return google_drive.list_recent(count)
+
+
+# Contacts (Phase 5 — delegated to google_contacts module)
 def google_contacts_search(query: str) -> str:
-    service = _service("people", "v1")
-    people = service.people().searchContacts(query=query, readMask="names,emailAddresses,phoneNumbers", pageSize=5).execute().get("results", [])
-    names = [r.get("person", {}).get("names", [{}])[0].get("displayName", "Unknown") for r in people]
-    return "Contacts: " + "; ".join(names) if names else f"No contacts matching {query}."
+    return google_contacts.search(query)
+
+
+def google_contacts_get(query: str) -> str:
+    """Get contact details (name, email, phone)."""
+    details = google_contacts.get_details(query)
+    if not details:
+        return f"No contact named {query}."
+    name = details.get("name", "Unknown")
+    emails = details.get("emails", [])
+    phones = details.get("phones", [])
+    parts = [name]
+    if emails:
+        parts.append(f"email: {emails[0]}")
+    if phones:
+        parts.append(f"phone: {phones[0]}")
+    return ", ".join(parts)
+
+
+def google_contacts_resolve_phone(query: str) -> str:
+    """Resolve a contact name to a phone number."""
+    return google_contacts.resolve_phone(query)
 
 
 SKILLS = [
@@ -121,7 +131,25 @@ SKILLS = [
           "query": {"type": "string"}
       }, "required": ["query"]}}, search_google_maps),
     ({"name": "google_calendar_upcoming", "description": "List upcoming Google Calendar events.", "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}}}, google_calendar_upcoming),
-    ({"name": "google_gmail_search", "description": "Search the user's Gmail through Google OAuth and return sender and subject summaries.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}, google_gmail_search),
+    ({"name": "google_calendar_search", "description": "Search calendar events between two dates (YYYY-MM-DD).", "parameters": {"type": "object", "properties": {"start_date": {"type": "string"}, "end_date": {"type": "string"}}, "required": ["start_date"]}}, google_calendar_search),
+    ({"name": "google_gmail_search", "description": "Search the user's Gmail and return sender and subject summaries.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}, google_gmail_search),
+    ({"name": "google_gmail_read", "description": "Read the full body of a Gmail message by ID.", "parameters": {"type": "object", "properties": {"msg_id": {"type": "string"}}, "required": ["msg_id"]}}, google_gmail_read),
     ({"name": "google_drive_search", "description": "Search the user's Google Drive files by name.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}, google_drive_search),
+    ({"name": "google_drive_read", "description": "Read the text content of a Google Doc by file ID.", "parameters": {"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]}}, google_drive_read),
+    ({"name": "google_drive_recent", "description": "List recently modified Google Drive files.", "parameters": {"type": "object", "properties": {"count": {"type": "integer"}}}}, google_drive_recent),
     ({"name": "google_contacts_search", "description": "Search the user's Google Contacts by name.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}, google_contacts_search),
+    ({"name": "google_contacts_get", "description": "Get contact details (name, email, phone) for the best match.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}, google_contacts_get),
+    ({"name": "google_calendar_create",
+      "description": "Create a Google Calendar event. start is ISO local time like 2026-06-21T15:00.",
+      "parameters": {"type": "object", "properties": {
+          "summary": {"type": "string"}, "start": {"type": "string"},
+          "duration_min": {"type": "integer"}
+      }, "required": ["summary", "start"]}}, google_calendar_create),
+    ({"name": "google_gmail_send",
+      "description": "Send an email. First call WITHOUT confirm to preview; read it back to "
+                     "the user, then call again with confirm=true after they approve.",
+      "parameters": {"type": "object", "properties": {
+          "to": {"type": "string"}, "subject": {"type": "string"},
+          "body": {"type": "string"}, "confirm": {"type": "boolean"}
+      }, "required": ["to", "subject", "body"]}}, google_gmail_send),
 ]

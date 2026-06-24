@@ -7,40 +7,114 @@ BASE_DIR = Path(__file__).resolve().parent
 VOICES_DIR = BASE_DIR / "voices"
 MEMORY_DIR = BASE_DIR / "memory_store"
 
+# --- Logging (Phase 0) ---
+# Logs live outside the package (D:\jarvis\logs) so the package dir stays clean.
+LOG_DIR = str(BASE_DIR.parent / "logs")
+LOG_FILE_NAME = os.environ.get("LEHA_LOG_FILE", "leha.log")
+LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "7"))
+LOG_MAX_SIZE_MB = int(os.environ.get("LOG_MAX_SIZE_MB", "10"))
+
 # --- Brain ---
 # Engine: "groq" (cloud, instant), "local" (Ollama on CPU), "auto" (Groq → local fallback)
-# Clone TTS is intentionally slow on this CPU. Keep the brain local so cloud
-# quota failures never generate a second status reply while synthesis is pending.
-BRAIN_ENGINE = "local"
+# "auto" = Groq cloud (smart, fast tool-calling) with local Ollama fallback on
+# rate-limit/network error. Rate-limit raises -> silent local fallback (no double
+# reply). Local qwen2.5:3b alone handles 80+ tools poorly, so prefer auto.
+BRAIN_ENGINE = "auto"
 GROQ_BRAIN_MODEL = "llama-3.1-8b-instant"   # higher daily limit + faster than 70b
 # Only send these tools to the cloud brain (keeps each request small -> under
 # the free-tier 6000 tokens/min limit). Reflexes in assistant_core handle the
 # rest locally. Empty/None = send all (will hit rate limits).
 GROQ_TOOL_ALLOWLIST = [
-    "calculate", "web_search", "open_app", "close_app", "play_youtube",
-    "system_info", "get_weather", "set_reminder", "remember_fact",
-    "run_command", "diagnose_leaf", "lock_pc",
-    # Windows system control
-    "sleep_pc", "restart_pc", "shutdown_pc", "hibernate_pc", "logoff_pc",
-    "get_processes", "kill_process",
-    "show_desktop", "minimize_all", "snap_window", "switch_to_app",
-    "set_brightness", "turn_off_screen", "eject_usb",
-    "get_ip", "toggle_wifi", "list_wifi",
-    "dark_mode", "set_wallpaper", "battery_report", "find_large_files",
-    # Screen awareness + personal context (Siri-AI parity)
-    "read_screen", "see_screen", "read_clipboard", "set_clipboard",
-    "search_file_contents", "recent_files", "find_anything", "ask_docs",
-    "search_email", "recent_email", "unread_email",
-    # Phone (Android via ADB)
-    "phone_status", "phone_open_app", "phone_send_sms", "phone_key",
-    "phone_type", "phone_screenshot", "phone_notifications", "phone_ring",
-    "phone_whatsapp", "phone_read_sms", "phone_unread_sms", "phone_call",
+    # Device/media commands are handled locally before the brain. Keep cloud
+    # schemas small so fast Groq requests do not exhaust the free quota.
+    "calculate", "web_search", "get_weather", "set_reminder", "remember_fact",
+    "read_screen", "see_screen", "search_file_contents", "find_anything",
+    "ask_docs", "google_calendar_upcoming", "google_gmail_search",
+    "google_drive_search", "google_contacts_search",
+    # Google (Maps + OAuth read/write)
+    "open_google_maps", "search_google_maps", "google_calendar_upcoming",
+    "google_gmail_search", "google_drive_search", "google_contacts_search",
+    "google_calendar_create", "google_gmail_send",
 ]
 GROQ_TIMEOUT_SECONDS = 12
+OPENAI_BRAIN_MODEL = os.environ.get("OPENAI_BRAIN_MODEL", "gpt-4.1-mini").strip()
+OPENAI_BRAIN_TIMEOUT_SECONDS = 12
+
+# --- Cloudflare Workers AI (primary cloud brain when configured) ---
+# Store only a freshly created, least-privilege Workers AI token in
+# D:\jarvis\.cloudflare_token. The account id can be supplied through the
+# environment or the legacy .cloudflare_creds file. Neither file is committed.
+def _load_cloudflare():
+    acct = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    tok = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+    if acct and tok:
+        return acct, tok
+
+    token_file = BASE_DIR.parent / ".cloudflare_token"
+    if acct and token_file.exists():
+        return acct, token_file.read_text(encoding="utf-8").strip()
+
+    f = BASE_DIR.parent / ".cloudflare_creds"
+    if f.exists():
+        raw = f.read_text(encoding="utf-8").strip()
+        if ":" in raw:
+            a, _, t = raw.partition(":")
+            return a.strip(), t.strip()
+    return "", ""
+
+
+CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN = _load_cloudflare()
+# A token pasted into a chat or terminal history should be treated as exposed.
+# Keep this opt-in so Leha cannot accidentally send requests with an old token.
+CF_BRAIN_ENABLED = os.environ.get("CF_BRAIN_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+CF_BRAIN_MODEL = os.environ.get(
+    "CF_BRAIN_MODEL", "@cf/meta/llama-3.1-8b-instruct-fast"
+).strip()
+# Avoid making the voice loop wait behind a cold or overloaded remote model.
+CF_BRAIN_TIMEOUT_SECONDS = 12
 # Do not block the always-on microphone while retrying a throttled cloud model.
 # A short spoken status is better than a frozen assistant.
 GROQ_RATE_LIMIT_RETRY_SECONDS = 0
 GROQ_RATE_LIMIT_REPLY = "My fast brain is busy for a moment, Sir. Please try again."
+# Skip a cloud provider briefly after it fails or rate-limits instead of making
+# every new spoken command wait for the same known-bad request.
+PROVIDER_COOLDOWN_SECONDS = 45
+
+# Circuit breaker thresholds (Phase 2).  A provider is opened after this many
+# consecutive failures; it stays open for PROVIDER_COOLDOWN_SECONDS, then
+# enters half-open for CB_HALF_OPEN_SECONDS before a probe is allowed.
+CB_FAILURE_THRESHOLD = int(os.environ.get("CB_FAILURE_THRESHOLD", "3"))
+CB_HALF_OPEN_SECONDS = int(os.environ.get("CB_HALF_OPEN_SECONDS", "30"))
+
+# Skill result cache (Phase 2).  Disabled by default; enable to cache read-only
+# skill outputs (weather, system_info, calendar, ...) with a per-skill TTL.
+SKILL_CACHE_ENABLED = os.environ.get("SKILL_CACHE_ENABLED", "true").lower() == "true"
+SKILL_CACHE_MAX_SIZE = int(os.environ.get("SKILL_CACHE_MAX_SIZE", "128"))
+
+# Background job queue (Phase 2).  Long-running actions run in the background.
+BACKGROUND_JOBS_ENABLED = os.environ.get("BACKGROUND_JOBS_ENABLED", "true").lower() == "true"
+BACKGROUND_JOBS_WORKERS = int(os.environ.get("BACKGROUND_JOBS_WORKERS", "2"))
+
+# Acoustic echo cancellation (Phase 3).  Software AEC enables barge-in with
+# laptop speakers; hardware headsets do AEC in the device itself.
+AEC_ENABLED = os.environ.get("AEC_ENABLED", "false").lower() == "true"
+AEC_LIBRARY = os.environ.get("AEC_LIBRARY", "speexdsp").strip()
+AEC_HARDWARE_DEVICE = os.environ.get("AEC_HARDWARE_DEVICE", "").strip() or None
+
+# Speech manager (Phase 3).  Central queue guarantees one voice output at a time.
+SPEECH_MANAGER_ENABLED = os.environ.get("SPEECH_MANAGER_ENABLED", "true").lower() == "true"
+
+# Audit log (Phase 4).  Records every tool execution to memory_store/audit.logl.
+AUDIT_LOG_ENABLED = os.environ.get("AUDIT_LOG_ENABLED", "true").lower() == "true"
+AUDIT_LOG_MAX_SIZE_MB = int(os.environ.get("AUDIT_LOG_MAX_SIZE_MB", "50"))
+
+# Undo stack (Phase 4).  Reversible actions can be undone via "Leha undo".
+UNDO_ENABLED = os.environ.get("UNDO_ENABLED", "true").lower() == "true"
+UNDO_STACK_DEPTH = int(os.environ.get("UNDO_STACK_DEPTH", "20"))
+
+# Google services (Phase 5).  Rate limiting and confirmation requirements.
+GOOGLE_RATE_LIMIT_PER_MINUTE = int(os.environ.get("GOOGLE_RATE_LIMIT_PER_MINUTE", "30"))
+GOOGLE_CONFIRM_REQUIRED = {"create", "send", "delete"}
 
 OLLAMA_HOST = "http://127.0.0.1:11434"
 # Local brain model (used when BRAIN_ENGINE="local" or as auto fallback).
@@ -53,7 +127,34 @@ ASSISTANT_NAME = "Leha"
 USER_NAME = "Sir"
 ASSISTANT_MODE = "ultra"
 LEHA_BUILD = "2026.06.20-rate-limit-local-fallback"
-SPEAK_WAKE_ACK = False
+
+
+def _load_version() -> str:
+    """Read the semantic version from the VERSION file next to this package."""
+    try:
+        return (BASE_DIR / "VERSION").read_text(encoding="utf-8").strip() or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+# Semantic version (Phase 9). LEHA_BUILD stays as the human build tag.
+LEHA_VERSION = _load_version()
+
+# --- Device manager (Phase 6) ---
+# Pairing approval, session expiry, per-device rate limits and capability
+# scoping for remote clients. Disabled by default so the existing PIN-gated
+# web/Android path is unchanged until the owner opts in.
+DEVICE_MANAGER_ENABLED = os.environ.get("DEVICE_MANAGER_ENABLED", "false").lower() == "true"
+DEVICE_SESSION_TTL_SECONDS = int(os.environ.get("DEVICE_SESSION_TTL_SECONDS", "3600"))
+DEVICE_RATE_LIMIT_PER_MINUTE = int(os.environ.get("DEVICE_RATE_LIMIT_PER_MINUTE", "60"))
+
+# --- Structured memory (Phase 8) ---
+STRUCTURED_MEMORY_ENABLED = os.environ.get("STRUCTURED_MEMORY_ENABLED", "true").lower() == "true"
+
+# Home Assistant knobs (Phase 7) are defined lower down, after _load_secret.
+# Use the activation sound instead of speaking the name back. A spoken wake
+# acknowledgement can be heard by the microphone and retrigger local models.
+SPEAK_WAKE_ACK = True
 
 SYSTEM_PROMPT = (
     "You are Leha, a capable voice assistant on the user's Windows laptop. "
@@ -76,6 +177,9 @@ SYSTEM_PROMPT = (
     "use unread_email, recent_email, or search_email with Gmail search syntax. "
     "For phone messages use phone_read_sms / phone_unread_sms; to text someone use "
     "phone_send_sms or phone_whatsapp; to call use phone_call. "
+    "For calendar use google_calendar_upcoming to read, google_calendar_create to add. "
+    "To send email, call google_gmail_send WITHOUT confirm first, read the preview "
+    "back to the user, and only call again with confirm=true after they say yes. "
     "ALWAYS use the calculate tool for any arithmetic instead of doing it in your head. "
     "To check or change something on the computer (disk, processes, files, settings), call "
     "run_command instead of asking the user to provide it. "
@@ -120,12 +224,21 @@ WHISPER_LANG = "en"           # set None for auto-detect (Telugu/Hindi, slower)
 # or local ignored files next to the project: .deepgram_key / .openai_key.
 DEEPGRAM_API_KEY = _load_secret("DEEPGRAM_API_KEY", ".deepgram_key")
 DEEPGRAM_STT_MODEL = os.environ.get("DEEPGRAM_STT_MODEL", "nova-3").strip()
-OPENAI_API_KEY = _load_secret("OPENAI_API_KEY", ".openai_key")
+# Prefer the verified local key file. A stale inherited Windows environment
+# variable previously overrode it and caused OpenAI fallback 401 errors.
+OPENAI_API_KEY = _load_secret("", ".openai_key") or os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_STT_MODEL = os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe").strip()
-STT_REQUEST_TIMEOUT_SECONDS = 8
+STT_REQUEST_TIMEOUT_SECONDS = 5
 # Keep an always-on assistant responsive. Set True only when local Whisper is
 # already warm and you explicitly prefer a slow offline fallback.
 STT_CLOUD_FALLBACK_TO_LOCAL = False
+
+# --- Home Assistant (Phase 7) ---
+# Scoped long-lived access token + base URL. Empty token => "not configured"
+# graceful degrade; nothing is contacted until both are set.
+HOME_ASSISTANT_URL = os.environ.get("HOME_ASSISTANT_URL", "").strip()
+HOME_ASSISTANT_TOKEN = _load_secret("HOME_ASSISTANT_TOKEN", ".home_assistant_token")
+HOME_ASSISTANT_ENABLED = bool(HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN)
 
 # --- Wake word / audio ---
 SAMPLE_RATE = 16000
@@ -140,14 +253,30 @@ PORCUPINE_KEYWORD_PATH = os.environ.get("PORCUPINE_KEYWORD_PATH", "").strip()
 
 # openwakeword (offline, no signup — only works with clean mic, e.g. Jabra USB)
 # Set OWW_ENABLED=True only after confirming: python diag_oww.py shows rms > 100
-OWW_ENABLED = False   # <- set True to activate; needs Jabra plugged in
-OWW_MODEL_NAME = "hey_jarvis"
+OWW_ENABLED = False
+OWW_MODEL_NAME = "hey_jarvis"  # only used when OWW_MODEL_PATH is empty
+OWW_MODEL_PATH = os.environ.get("OWW_MODEL_PATH", "").strip()
 OWW_THRESHOLD = 0.5   # 0.3=sensitive, 0.7=strict
+
+# Locally trained Leha wake model. This lightweight ONNX detector is trained
+# from the user's private wake clips and runs before cloud transcription.
+CUSTOM_WAKE_MODEL_PATH = os.environ.get(
+    "CUSTOM_WAKE_MODEL_PATH", str(BASE_DIR / "voices" / "leha_wake_model.onnx")
+).strip()
+CUSTOM_WAKE_ENABLED = False
+# The first live test saw speaker/room false positives near 0.951. Recorded
+# Leha samples score near 1.0, so use a conservative production threshold.
+CUSTOM_WAKE_THRESHOLD = 0.995
+
+# Wake word additional settings
+WAKE_COOLDOWN_SECONDS = int(os.environ.get("WAKE_COOLDOWN_SECONDS", "4"))  # seconds after wake to ignore re-trigger
+WAKE_CONFIDENCE_LOG = os.environ.get("WAKE_CONFIDENCE_LOG", "").strip()  # file path for wake confidence log
+WAKE_DASHBOARD_ENABLED = os.environ.get("WAKE_DASHBOARD_ENABLED", "false").lower() == "true"  # system tray dashboard
 
 # Mic selection + gain. The Windows DEFAULT mic captured silence on this laptop;
 # device 13 ("Microphone Array 4") was the only live one in the scan. Set the
 # index here (run diag_mic_scan.py to re-check; indices can change on reboot).
-MIC_DEVICE = "Jabra"          # name substring (robust to index changes); None = default
+MIC_DEVICE = 12               # Microphone Array 3: supports the always-on callback stream
 INPUT_GAIN = 2.0              # mild boost; headset speech rms ~300
 
 # --- Command capture ---
@@ -158,6 +287,8 @@ COMMAND_SECONDS = 5           # how long to listen after wake
 # "hf" calls a warm Hugging Face Inference Endpoint.
 # Clone mode is disabled for live use: CPU synthesis takes around a minute and
 # can leave delayed replies. Keep the reference setup below for a later GPU run.
+# Use the neural female voice for live replies. Windows SAPI remains available
+# only as a diagnostic fallback when the neural service itself is unavailable.
 TTS_ENGINE = "edge"
 TTS_RATE = 175
 # Neerja is a female Indian-English neural voice. It is not a true clone, but
@@ -253,13 +384,16 @@ WAKE_FREE_MEDIA_CONTROLS = True
 
 # Continuous conversation: after a reply, listen for a follow-up without
 # needing "Hey Jarvis" again, for this many seconds (0 = off).
-FOLLOWUP_SECONDS = 25
+# Keep every normal command explicitly addressed until the dedicated local wake
+# detector is validated. This prevents room conversation from using a stale
+# follow-up session after a previous Leha command.
+FOLLOWUP_SECONDS = 0
 
 # Voice-activity capture: stop recording after this much silence instead of
 # a fixed window. Tune SILENCE_RMS up if it cuts you off, down if it hangs.
 USE_VAD = True
 MAX_COMMAND_SECONDS = 12
-SILENCE_MS = 650             # enough for natural pauses without clipping a request
+SILENCE_MS = 350             # faster turn-taking; local commands are usually short
 SILENCE_RMS = 280            # int16 RMS threshold for "silence" (post-gain)
 
 # --- Ultra beat mode ---
@@ -272,6 +406,10 @@ VAD_CALIBRATION_SECONDS = 1.5
 BARGE_IN_RMS_BOOST = 2.0
 ASSISTANT_EARCON_FREQ = 1200
 ASSISTANT_EARCON_DUR_MS = 120
+# The listener writes a lightweight state line at this interval so a stalled
+# microphone or cloud request is visible in logs and the health command.
+HEARTBEAT_SECONDS = 30
+MIC_RECOVERY_MAX_SECONDS = 20
 
 # Optional rough owner voice gate. Say "Leha train my voice" first, then set
 # SPEAKER_VERIFY_ENABLED=True if you want sensitive commands to require your voice.
@@ -304,6 +442,21 @@ ROUTINES = {
     "work": [
         {"action": "open_app", "name": "code"},
         {"action": "open_app", "name": "chrome"},
+    ],
+    "work mode": [
+        {"action": "say", "text": "Work mode on, Sir."},
+        {"action": "open_app", "name": "code"},
+        {"action": "open_app", "name": "chrome"},
+    ],
+    "movie mode": [
+        {"action": "say", "text": "Movie mode, Sir."},
+        {"action": "open_url", "url": "https://www.youtube.com"},
+    ],
+    "leaving home": [
+        {"action": "say", "text": "Leaving home. Safe travels, Sir."},
+    ],
+    "good night": [
+        {"action": "say", "text": "Good night, Sir."},
     ],
 }
 

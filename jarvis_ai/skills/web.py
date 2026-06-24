@@ -1,4 +1,6 @@
 """Web skills: search, open URLs, and fetch+read a page for summarizing."""
+from __future__ import annotations
+
 import urllib.parse
 import webbrowser
 
@@ -32,6 +34,31 @@ def fetch_page(url: str) -> str:
         return f"Fetch error: {e}"
 
 
+def fetch_page_background(url: str) -> str:
+    """Background-fetch a web page so a slow site cannot stall the mic loop.
+
+    When ``config.BACKGROUND_JOBS_ENABLED`` is True this returns immediately
+    with a status line and the actual text arrives via the shared background
+    pool; when disabled it runs ``fetch_page`` inline and returns the text
+    directly (identical to the legacy behavior). The original ``fetch_page``
+    skill is preserved unchanged.
+    """
+    from . import submit_background
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    result = submit_background(
+        f"fetch_page:{url[:60]}",
+        lambda: fetch_page(url),
+    )
+    # submit_background returns the inline result when disabled, or a job id
+    # string when the pool accepted it.
+    if isinstance(result, str) and result.startswith("Fetching"):
+        return result
+    if result is None or isinstance(result, str) and result.startswith("job_"):
+        return f"Fetching {url} in the background, Sir. I'll have it shortly."
+    return result
+
+
 SKILLS = [
     ({"name": "web_search",
       "description": "Search the web for a query in the default browser.",
@@ -45,4 +72,8 @@ SKILLS = [
       "description": "Fetch the readable text of a web page so it can be summarized or queried.",
       "parameters": {"type": "object",
                      "properties": {"url": {"type": "string"}}, "required": ["url"]}}, fetch_page),
+    ({"name": "fetch_page_background",
+      "description": "Fetch a web page in the background so a slow site does not block the assistant.",
+      "parameters": {"type": "object",
+                     "properties": {"url": {"type": "string"}}, "required": ["url"]}}, fetch_page_background),
 ]

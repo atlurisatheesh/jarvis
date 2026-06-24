@@ -55,6 +55,12 @@ class Ears:
         }
         if primary not in providers:
             return []
+        # A deliberately selected provider should be decisive. Falling through
+        # to unrelated cloud providers after an empty result adds many seconds
+        # and can surface stale/invalid keys. Multi-provider behavior remains
+        # available only when STT_ENGINE is explicitly set to "auto".
+        if (config.STT_ENGINE or "").lower() != "auto":
+            return [primary] if available[primary] and primary not in self._disabled_providers else []
         ordered = [primary] + [name for name in providers if name != primary]
         return [name for name in ordered if available[name] and name not in self._disabled_providers]
 

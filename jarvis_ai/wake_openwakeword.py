@@ -19,6 +19,7 @@ Models download automatically on first run (~30MB).
 import collections
 import queue
 import math
+import os
 
 import numpy as np
 import sounddevice as sd
@@ -30,6 +31,10 @@ from scipy.signal import resample_poly
 
 def is_available() -> bool:
     if not getattr(config, "OWW_ENABLED", False):
+        return False
+    model_path = getattr(config, "OWW_MODEL_PATH", "").strip()
+    if model_path and not os.path.isfile(model_path):
+        print(f"[oww] custom model not found: {model_path}", flush=True)
         return False
     try:
         import openwakeword  # noqa: F401
@@ -56,9 +61,11 @@ class OWWListener:
     def __init__(self):
         from openwakeword.model import Model
 
-        model_name = getattr(config, "OWW_MODEL_NAME", "hey_jarvis")
+        configured_name = getattr(config, "OWW_MODEL_NAME", "hey_jarvis")
+        model_path = getattr(config, "OWW_MODEL_PATH", "").strip()
+        model_name = model_path or configured_name
         self._threshold = float(getattr(config, "OWW_THRESHOLD", 0.5))
-        self._model_name = model_name
+        self._model_name = os.path.splitext(os.path.basename(model_path))[0] if model_path else model_name
         # Load model; downloads ~30MB on first run
         print(f"[oww] loading model '{model_name}'...", flush=True)
         self._model = Model(wakeword_models=[model_name], inference_framework="onnx")

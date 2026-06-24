@@ -1,0 +1,16 @@
+{
+  "id": "satheeshatluri/leha-private-wake-model-training",
+  "title": "Leha Private Wake Model Training",
+  "code_file": "train_leha_wake.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "satheeshatluri/leha-private-wake-recordings"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

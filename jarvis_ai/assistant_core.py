@@ -266,6 +266,11 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     if not low:
         return IntentResult(False)
 
+    # Ignore conversational fillers. They otherwise reach the cloud brain while
+    # the follow-up window is open and waste a request without a real command.
+    if low in {"uh huh", "uh-huh", "huh", "hmm", "um", "okay then"}:
+        return IntentResult(True, "", keep_active=True, action="filler")
+
     # ── Pending confirmation check ────────────────────────────────────
     if _PENDING_CONFIRM["action"]:
         if low in {"yes", "confirm", "yeah", "sure", "do it", "yes please", "yes sir"}:
@@ -301,6 +306,30 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         mode = config.TTS_ENGINE
         clone_ready = "ready" if config.CLONE_TTS_REFERENCE else "not configured"
         return IntentResult(True, f"Voice mode is {mode}. Cloned voice is {clone_ready}.", action="voice_mode")
+
+    if low in {"health", "leha health", "assistant health", "system health", "check health"}:
+        from .health import voice_summary
+        return IntentResult(True, voice_summary(), action="health")
+
+    capability_words = {"access", "accessible", "capability", "capabilities"}
+    capability_phrases = (
+        "what can you do",
+        "what all can you do",
+        "what do you have access to",
+        "what can you access",
+        "what all can you access",
+        "what access do you have",
+        "what are all you can able to access",
+    )
+    if (
+        any(phrase in low for phrase in capability_phrases)
+        or (bool(_words(low) & capability_words) and any(word in low for word in ("laptop", "computer", "system")))
+    ):
+        reply = (
+            "I can control approved apps, tabs, media and volume; check system, files and screen when asked; "
+            "and use your connected Google and phone services. I cannot access passwords or bypass permissions."
+        )
+        return IntentResult(True, reply, keep_active=True, action="capabilities")
 
     if low in {"date", "what date", "what is the date", "today date", "what day", "what day is it"}:
         return IntentResult(True, datetime.now().strftime("Today is %A, %d %B %Y."), action="date")
@@ -578,5 +607,72 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     if low in {"phone back", "go back on phone"}:
         result = skills.run_tool("phone_key", {"key": "back"})
         return IntentResult(True, result, action="phone_back")
+
+    # ── Phase 2: Expanded local reflexes ────────────────────────────────
+
+    # Network / system quick status
+    if low in {"network status", "my network", "network info", "connection status"}:
+        parts = []
+        try:
+            parts.append(skills.run_tool("my_ip", {}))
+        except Exception:
+            pass
+        try:
+            parts.append(skills.run_tool("system_info", {}))
+        except Exception:
+            pass
+        return IntentResult(True, " ".join(parts) or "Network info unavailable.", action="network_status")
+
+    # Disk space / storage quick check
+    if low in {"disk space", "storage", "hard drive", "disk usage", "how much space",
+               "free space", "drive space"}:
+        try:
+            result = skills.run_tool("run_command", {"command": "Get-PSDrive C | Select-Object Used,Free | Format-List"})
+            # Truncate long output for voice
+            lines = result.split("\n")[:6]
+            return IntentResult(True, " ".join(lines), action="disk_space")
+        except Exception:
+            return IntentResult(True, "Could not check disk space.", action="disk_space")
+
+    # Uptime
+    if low in {"uptime", "how long has it been on", "system uptime", "last boot",
+               "when did i boot", "boot time"}:
+        try:
+            result = skills.run_tool("run_command", {"command": "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"})
+            return IntentResult(True, f"Last boot: {result.strip()}", action="uptime")
+        except Exception:
+            return IntentResult(True, "Could not check uptime.", action="uptime")
+
+    # Window list — what apps are open
+    if low in {"what is open", "open windows", "open apps", "show windows",
+               "what apps are open", "list windows", "running apps"}:
+        try:
+            result = skills.run_tool("list_apps", {})
+            return IntentResult(True, result, action="list_apps")
+        except Exception:
+            return IntentResult(True, "Could not list windows.", action="list_apps")
+
+    # ── Phase 4: Undo support ────────────────────────────────────────────
+
+    if low in {"undo", "undo last", "undo that", "take that back", "revert"}:
+        try:
+            from .undo import get_undo_stack
+            stack = get_undo_stack()
+            if stack and stack.recent:
+                desc = stack.recent[-1].get("description", "the last action")
+                result = stack.undo_last()
+                return IntentResult(True, result or f"Undone: {desc}.", action="undo")
+            return IntentResult(True, "Nothing to undo, Sir.", action="undo_empty")
+        except Exception:
+            return IntentResult(True, "Undo is not available.", action="undo_error")
+
+    if low in {"undo all", "undo everything", "revert all"}:
+        try:
+            from .undo import get_undo_stack
+            stack = get_undo_stack()
+            result = stack.undo_all()
+            return IntentResult(True, result or "All reversible actions undone.", action="undo_all")
+        except Exception:
+            return IntentResult(True, "Could not undo.", action="undo_error")
 
     return IntentResult(False)

@@ -1,6 +1,9 @@
 .groq_key
 .deepgram_key
 .openai_key
+.openai_key.backup
+.cloudflare_token
+.cloudflare_account_id
 .hf_token
 voice_gpu_bundle.zip
 leha_gpu_outputs.zip
@@ -10,7 +13,9 @@ kaggle_voice_job/
 # Personal voice recordings and generated clone samples stay on this machine.
 jarvis_ai/voices/*.wav
 jarvis_ai/voices/*.mp3
+jarvis_ai/voices/*.onnx
 jarvis_ai/voices/hf_cache/
+jarvis_ai/voices/wake_leha/
 __pycache__/
 *.pyc
 logs/
@@ -24,3 +29,27 @@ google_token.json
 google_credentials.json
 google_token.json
 .phone_ip
+.cloudflare_creds
+.home_assistant_token
+
+# Owner voice recordings (wake-word capture) — biometric, keep local only.
+jarvis_ai/voices/wake_leha_continuous/
+jarvis_ai/voices/wake_leha_retry/
+
+# Personal runtime stores (facts, reminders, audit log, vector DB).
+jarvis_ai/memory_store/
+
+# Wake-training dataset outputs (large, regenerable).
+kaggle_wake_job/outputs/
+
+# Android build cache.
+android-app/.gradle/
+android-app/.idea/
+android-app/build/
+android-app/app/build/
+
+# Stray Windows redirect artifact.
+nul
+
+# Wake training bundle contains owner voice clips — keep local.
+kaggle_wake_job/dataset/leha_wake_training_bundle.zip

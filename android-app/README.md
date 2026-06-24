@@ -6,15 +6,22 @@ talks to the Leha web server running on your laptop.
 > The brain + 81 tools run on the **laptop**. This app is the phone front-end.
 > Phone and laptop must be on the **same Wi-Fi** (or use a tunnel for anywhere).
 
-## What it does (v1)
+## What it does (v2 — hands-free)
 
 - Real app icon "Leha" on your home screen
-- Press-and-hold the orb → record → release → sends to laptop
-- Laptop transcribes (Deepgram) + runs the full assistant + replies
-- Reply shown on screen **and spoken** by the phone (native Android TTS)
+- Tap **START once** → Leha listens continuously ("just talk", Siri-style)
+- Auto-detects when you finish speaking (VAD), sends to laptop, speaks reply,
+  then listens again. Mutes itself while speaking (no self-trigger).
+- Screen stays awake while active
+- Laptop transcribes (Deepgram) + runs the full assistant (92 tools) + replies
+- Reply shown **and spoken** by the phone (native Android TTS)
 - Settings screen for laptop IP + PIN (saved on device)
 
-Not in v1 (needs more work): "Hey Leha" always-on wake word, background service.
+Better than Siri at: controlling your actual laptop (apps, files, shell, Windows)
+AND your Android phone (SMS, calls, apps) — Siri can't touch your PC.
+
+Not yet: "Hey Leha" wake word with screen off (needs a foreground service +
+offline wake model; planned). Today you tap START, then it's hands-free.
 
 ## Build it (one time — needs a computer)
 

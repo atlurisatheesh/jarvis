@@ -46,6 +46,27 @@ python -m jarvis_ai.main
 
 This launches the maintained always-on listener in `jarvis_ai.listen`.
 
+## Cloudflare Primary Brain
+
+Leha supports this response order when Cloudflare is enabled:
+
+```text
+Cloudflare Workers AI -> Groq -> OpenAI -> local Ollama
+```
+
+For safety, Cloudflare is disabled until a fresh API token is configured. Create
+a new restricted Cloudflare token with Workers AI permission, then save only the
+token in `D:\jarvis\.cloudflare_token`. Set these Windows environment values
+before restarting Leha:
+
+```powershell
+[Environment]::SetEnvironmentVariable('CLOUDFLARE_ACCOUNT_ID', 'your-account-id', 'User')
+[Environment]::SetEnvironmentVariable('CF_BRAIN_ENABLED', '1', 'User')
+```
+
+Do not put tokens in `config.py`, Git, chat messages, or screenshots. A token
+that was shared outside your machine should be revoked and replaced first.
+
 Say **"Leha"**, wait for **"Yes, Sir?"**, then speak a command:
 
 - "What time is it?"
@@ -69,6 +90,22 @@ While music or YouTube is playing, these playback controls work without saying L
 - "volume up" / "volume down"
 
 To exit Leha, say "goodbye" or "stop listening", or press Ctrl+C.
+
+Say **"Leha health"** to hear a short status for the microphone, ears, brain,
+listener state, plus the last measured provider/timing after a completed turn.
+
+## Start Automatically With Windows
+
+Run this once:
+
+```powershell
+cd D:\jarvis
+powershell -ExecutionPolicy Bypass -File scripts\install_autostart.ps1
+```
+
+The installer first tries a Windows Scheduled Task. If Windows blocks that for
+your account, it safely installs a per-user Startup-folder launcher instead.
+Both launch the supervised listener after sign-in.
 
 Optional owner voice profile:
 
@@ -305,3 +342,57 @@ Local Piper option:
 - True Siri/Alexa far-field performance needs acoustic echo cancellation and better mic hardware.
 - Loud YouTube audio through speakers can still confuse any normal laptop/headset mic.
 - Brain fallback runs on CPU, so keep spoken answers short for best speed.
+
+## Offline "Leha" wake word (no Picovoice account)
+
+Picovoice's current console requires a company-email trial, so it is optional.
+Leha can instead use a locally trained openWakeWord ONNX model with no API key
+and no cloud audio upload.
+
+1. Record private wake clips:
+   ```powershell
+   python tools/record_leha_wake_samples.py --count 30
+   ```
+   Say the prompts naturally in a quiet room. The clips remain ignored by Git.
+2. Train/export an openWakeWord-compatible `leha.onnx` model on a GPU machine.
+   A reliable model needs positive Leha clips plus negative/background speech;
+   this cannot be replaced by a few copied recordings.
+3. Put the exported file somewhere private, for example
+   `jarvis_ai/voices/leha.onnx`, then set:
+   ```python
+   OWW_MODEL_PATH = r"jarvis_ai/voices/leha.onnx"
+   OWW_ENABLED = True
+   ```
+4. Restart Leha. Its startup log must say `[wake] engine: openwakeword`.
+
+Until `leha.onnx` exists, Leha deliberately stays on the existing Deepgram
+transcript wake path. Enabling the bundled `hey_jarvis` model would make the
+assistant listen for the wrong name.
+
+## Private Leha Wake-Word Workflow
+
+The local `leha_wake_model.onnx` remains disabled until it passes a real
+false-wake evaluation. Do not enable it based only on training accuracy.
+
+1. Record at least 40 positive wake clips:
+   ```powershell
+   python tools/record_leha_wake_samples.py --count 50 --output jarvis_ai/voices/wake_leha_new
+   ```
+2. Record at least 100 negative clips. Do **not** say Leha; include normal
+   conversation, TV/music, and room noise:
+   ```powershell
+   python tools/record_leha_wake_negatives.py --count 120
+   ```
+3. Package the private data for the GPU training job:
+   ```powershell
+   python tools/prepare_leha_wake_training_bundle.py
+   ```
+4. Train with the updated private Kaggle job, download its ONNX output, then
+   evaluate it on recordings not used for training:
+   ```powershell
+   python tools/evaluate_leha_wake_model.py `
+     --positive jarvis_ai/voices/wake_leha_eval `
+     --negative jarvis_ai/voices/wake_negative_eval
+   ```
+5. Only after the evaluation reports at least 95% wake recall and at most 1%
+   false wakes should `CUSTOM_WAKE_ENABLED` be changed to `True`.

@@ -104,6 +104,25 @@ def test_telegram_auth():
     return 1
 
 
+def test_remote_origin_gate():
+    """Remote (web/telegram/phone) must NOT run shell or destructive tools."""
+    from jarvis_ai import skills
+    passed = 0
+    skills.set_origin("remote")
+    for t in ["run_command", "shutdown_pc", "phone_call", "toggle_wifi", "kill_process"]:
+        out = skills.run_tool(t, {})
+        assert "blocked for remote" in out, f"remote {t} NOT blocked: {out}"
+        passed += 1
+        print(f"  OK  remote {t:14s} -> blocked")
+    # safe read tool still allowed over remote
+    out = skills.run_tool("get_ip", {})
+    assert "blocked" not in out, f"remote get_ip wrongly blocked: {out}"
+    print("  OK  remote get_ip         -> allowed")
+    passed += 1
+    skills.set_origin("local")  # reset
+    return passed
+
+
 if __name__ == "__main__":
     print("Mobile bridge — safe routing tests (no real actions executed)\n")
     n = 0
@@ -113,5 +132,7 @@ if __name__ == "__main__":
     n += test_destructive_gated()
     print("\nTelegram authorization:")
     n += test_telegram_auth()
+    print("\nRemote origin gate (shell/destructive blocked over network):")
+    n += test_remote_origin_gate()
     print(f"\n{n} checks passed. No SMS, calls, sleep, or shutdown were executed.")
     sys.exit(0)
