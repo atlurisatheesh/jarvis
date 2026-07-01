@@ -675,4 +675,46 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         except Exception:
             return IntentResult(True, "Could not undo.", action="undo_error")
 
+    # ── Phase 8: Structured memory reflexes ──────────────────────────────
+
+    if low in {"what do you remember", "what do you know about me",
+               "what have you remembered", "list memories", "my memories",
+               "show memories", "show my memories"}:
+        try:
+            from .structured_memory import summary
+            result = summary()
+        except Exception:
+            # Fall back to legacy flat memory.
+            try:
+                from .memory import all_facts
+                facts = all_facts()
+                result = "Facts: " + "; ".join(facts) if facts else "Nothing stored, Sir."
+            except Exception:
+                result = "Memory is not available."
+        return IntentResult(True, result, action="memory_recall")
+
+    if low in {"export my data", "export data", "export memories",
+               "download my data", "give me my data"}:
+        try:
+            from .structured_memory import export_all
+            import json as _json
+            data = export_all()
+            if not data:
+                result = "No personal data stored, Sir."
+            else:
+                result = f"You have {len(data)} stored items, Sir. Use 'export my data' via the web app for the full JSON."
+        except Exception:
+            result = "Data export is not available."
+        return IntentResult(True, result, action="memory_export")
+
+    m_forget = re.match(r"^forget\s+(?:that\s+)?(.+)$", low)
+    if m_forget and low not in {"forget it"}:
+        query = m_forget.group(1).strip()
+        try:
+            from .structured_memory import forget
+            result = forget(query=query)
+        except Exception:
+            result = "Memory forget is not available."
+        return IntentResult(True, result, action="memory_forget")
+
     return IntentResult(False)

@@ -270,5 +270,42 @@ class TestCloudflareBrain(unittest.TestCase):
         self.assertEqual(cb.state, "closed")
 
 
+# ---------------------------------------------------------------------------
+# Latency budget singleton (wired into live listener)
+# ---------------------------------------------------------------------------
+
+class TestLatencyBudgetSingleton(unittest.TestCase):
+    """Tests for the module-level get_latency_budget() singleton."""
+
+    def tearDown(self):
+        # Reset the singleton so each test starts clean.
+        import jarvis_ai.latency_budget as _lb
+        _lb._budget = None
+
+    def test_returns_latency_budget_instance(self):
+        from jarvis_ai.latency_budget import get_latency_budget, LatencyBudget
+        budget = get_latency_budget()
+        self.assertIsInstance(budget, LatencyBudget)
+
+    def test_same_instance_on_repeated_calls(self):
+        from jarvis_ai.latency_budget import get_latency_budget
+        a = get_latency_budget()
+        b = get_latency_budget()
+        self.assertIs(a, b)
+
+    def test_record_through_singleton(self):
+        from jarvis_ai.latency_budget import get_latency_budget
+        budget = get_latency_budget()
+        budget.record("stt", 0.5)
+        budget.record("stt", 1.5)  # over the 1.0s budget
+        self.assertEqual(budget.overruns["stt"], 1)
+
+    def test_singleton_has_default_budgets(self):
+        from jarvis_ai.latency_budget import get_latency_budget
+        budget = get_latency_budget()
+        self.assertIn("stt", budget.budgets)
+        self.assertEqual(budget.budgets["stt"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -25,15 +25,27 @@ class AssistantSession:
             config.FOLLOWUP_SECONDS if followup_seconds is None else followup_seconds
         )
         self.active_until = 0.0
+        # Count of consecutive commands inside the current follow-up window.
+        # Capped by CONVERSATION_MAX_TURNS so a stale session cannot be
+        # extended indefinitely by background room audio.
+        self._turn_count = 0
 
     def is_active(self) -> bool:
         return time.time() < self.active_until
 
     def activate(self):
+        """Start/refresh the follow-up window after a turn."""
         self.active_until = time.time() + self.followup_seconds
+        self._turn_count += 1
 
     def deactivate(self):
         self.active_until = 0.0
+        self._turn_count = 0
+
+    def _at_turn_cap(self) -> bool:
+        """True if the conversation must re-wake (safety cap reached)."""
+        cap = getattr(config, "CONVERSATION_MAX_TURNS", 0) or 0
+        return cap > 0 and self._turn_count >= cap
 
     def handle(self, heard: str, ask_brain: Callable[[str], str]) -> TurnResult:
         heard = (heard or "").strip()
@@ -57,7 +69,7 @@ class AssistantSession:
                 return TurnResult(heard, local.reply, True, local.quit_requested)
 
         triggered = has_trigger(heard)
-        active = self.is_active()
+        active = self.is_active() and not self._at_turn_cap()
         if config.REQUIRE_TRIGGER and not active and not triggered:
             return TurnResult(heard, ignored_reason="no wake trigger")
 

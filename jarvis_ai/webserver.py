@@ -28,6 +28,16 @@ session = AssistantSession()
 _WEB_DIR = Path(__file__).parent / "web"
 _HTML = (_WEB_DIR / "index.html").read_text(encoding="utf-8")
 
+# Phase 6: opt-in device manager for remote clients.
+_device_mgr = None
+if config.DEVICE_MANAGER_ENABLED:
+    try:
+        from .device_manager import get_device_manager
+        _device_mgr = get_device_manager()
+        print("[web] device_manager enabled — pairing/session/rate-limit active")
+    except Exception as _e:
+        print(f"[web] device_manager import failed: {_e}")
+
 
 def _pin_ok(request: Request) -> bool:
     """Require the access PIN on every API call (header or query)."""
@@ -35,6 +45,22 @@ def _pin_ok(request: Request) -> bool:
         return True
     given = request.headers.get("X-Leha-Pin") or request.query_params.get("pin", "")
     return given == config.WEB_PIN
+
+
+def _device_ok(request: Request) -> tuple[bool, str]:
+    """Check device session when device_manager is enabled.
+
+    Returns ``(allowed, reason)``. When the device manager is disabled the
+    request is always allowed (existing PIN gate is sufficient).
+    """
+    if _device_mgr is None:
+        return True, ""
+    token = (request.headers.get("X-Leha-Device-Token")
+             or request.query_params.get("device_token", ""))
+    if not token:
+        return False, "Missing device session token."
+    allowed, reason = _device_mgr.authorize(token, "read")
+    return allowed, reason
 
 
 def _route(text: str):
@@ -91,10 +117,89 @@ async def auth(req: Request):
     return JSONResponse({"ok": ok})
 
 
+# -- Phase 6: device pairing + session endpoints ----------------------------
+
+@app.post("/api/device/pair")
+async def device_pair(req: Request):
+    """Request pairing for a new device. Owner must approve on laptop."""
+    if _device_mgr is None:
+        return JSONResponse({"error": "Device manager is not enabled."}, status_code=501)
+    if not _pin_ok(req):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    body = await req.json()
+    device_id = (body.get("device_id") or "").strip()
+    name = (body.get("name") or device_id).strip()
+    if not device_id:
+        return JSONResponse({"error": "device_id is required."}, status_code=400)
+    dev = _device_mgr.request_pairing(device_id, name)
+    return JSONResponse({"device_id": dev.device_id, "status": dev.status})
+
+
+@app.post("/api/device/session")
+async def device_session(req: Request):
+    """Exchange an approved device_id for a session token."""
+    if _device_mgr is None:
+        return JSONResponse({"error": "Device manager is not enabled."}, status_code=501)
+    if not _pin_ok(req):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    body = await req.json()
+    device_id = (body.get("device_id") or "").strip()
+    if not device_id:
+        return JSONResponse({"error": "device_id is required."}, status_code=400)
+    token = _device_mgr.open_session(device_id)
+    if token is None:
+        return JSONResponse({"error": "Device not approved or unknown."}, status_code=403)
+    return JSONResponse({"token": token})
+
+
+@app.get("/api/device/pending")
+async def device_pending(req: Request):
+    """List devices awaiting approval (owner only — local or PIN-gated)."""
+    if _device_mgr is None:
+        return JSONResponse({"error": "Device manager is not enabled."}, status_code=501)
+    if not _pin_ok(req):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    pending = _device_mgr.pending()
+    return JSONResponse({"pending": [{"device_id": d.device_id, "name": d.name} for d in pending]})
+
+
+@app.post("/api/device/approve")
+async def device_approve(req: Request):
+    """Approve a pending device (owner action)."""
+    if _device_mgr is None:
+        return JSONResponse({"error": "Device manager is not enabled."}, status_code=501)
+    if not _pin_ok(req):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    body = await req.json()
+    device_id = (body.get("device_id") or "").strip()
+    if not device_id:
+        return JSONResponse({"error": "device_id is required."}, status_code=400)
+    ok = _device_mgr.approve(device_id)
+    return JSONResponse({"approved": ok})
+
+
+@app.post("/api/device/revoke")
+async def device_revoke(req: Request):
+    """Revoke a device (owner action)."""
+    if _device_mgr is None:
+        return JSONResponse({"error": "Device manager is not enabled."}, status_code=501)
+    if not _pin_ok(req):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    body = await req.json()
+    device_id = (body.get("device_id") or "").strip()
+    if not device_id:
+        return JSONResponse({"error": "device_id is required."}, status_code=400)
+    ok = _device_mgr.revoke(device_id)
+    return JSONResponse({"revoked": ok})
+
+
 @app.post("/api/voice")
 async def voice(request: Request, audio: UploadFile = File(...)):
     if not _pin_ok(request):
         return JSONResponse({"heard": "", "reply": "Locked. Enter PIN, Sir."}, status_code=401)
+    dev_ok, dev_reason = _device_ok(request)
+    if not dev_ok:
+        return JSONResponse({"heard": "", "reply": dev_reason}, status_code=403)
     data = await audio.read()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as f:
         f.write(data)
@@ -118,6 +223,9 @@ async def voice(request: Request, audio: UploadFile = File(...)):
 async def text(req: Request):
     if not _pin_ok(req):
         return JSONResponse({"heard": "", "reply": "Locked. Enter PIN, Sir."}, status_code=401)
+    dev_ok, dev_reason = _device_ok(req)
+    if not dev_ok:
+        return JSONResponse({"heard": "", "reply": dev_reason}, status_code=403)
     body = await req.json()
     msg = (body.get("text") or "").strip()
     if not msg:

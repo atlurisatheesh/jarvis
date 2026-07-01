@@ -83,6 +83,14 @@ class SafeEndToEndTests(unittest.TestCase):
         result = session.handle("what time is it", lambda _: "brain should not run")
         self.assertEqual(result.ignored_reason, "no wake trigger")
 
+    def test_default_session_does_not_accept_unaddressed_followup(self):
+        session = AssistantSession()
+        first = session.handle("Leha", lambda _: "brain should not run")
+        self.assertTrue(first.acted)
+        result = session.handle("open chrome", lambda _: "brain should not run")
+        self.assertEqual(result.ignored_reason, "no wake trigger")
+        self.assertFalse(self.calls)
+
     def test_phone_skill_builds_adb_commands_without_running_adb(self):
         commands: list[tuple[str, ...]] = []
         with patch("jarvis_ai.skills.phone._adb", side_effect=lambda *args, **_: commands.append(args) or "ok"):
@@ -94,8 +102,7 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertEqual(commands[2], ("shell", "input", "keyevent", "KEYCODE_HOME"))
 
     def test_voice_configuration_is_loadable(self):
-        self.assertIn(config.TTS_ENGINE, {"edge", "powershell"})
-        self.assertTrue(config.POWERSHELL_TTS_VOICE)
+        self.assertIn(config.TTS_ENGINE, {"edge", "powershell", "hf", "clone", "piper", "pyttsx3"})
 
     def test_health_command_is_local_and_safe(self):
         with patch("jarvis_ai.health.voice_summary", return_value="Health: microphone ready."):

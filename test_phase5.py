@@ -242,6 +242,13 @@ class TestGoogleSkillsRegistration(unittest.TestCase):
         self.assertIn("google_gmail_send", names)
         self.assertIn("open_google_maps", names)
 
+    def test_search_by_date_invalid_end_date(self):
+        from jarvis_ai.google_calendar import search_by_date
+        result = search_by_date("2026-06-24", end_date="not-a-date")
+        self.assertIn("Invalid end date", result)
+        # Should NOT have touched OAuth (no "not connected" error).
+        self.assertNotIn("not connected", result)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

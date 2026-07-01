@@ -383,11 +383,13 @@ REQUIRE_TRIGGER = True
 WAKE_FREE_MEDIA_CONTROLS = True
 
 # Continuous conversation: after a reply, listen for a follow-up without
-# needing "Hey Jarvis" again, for this many seconds (0 = off).
-# Keep every normal command explicitly addressed until the dedicated local wake
-# detector is validated. This prevents room conversation from using a stale
-# follow-up session after a previous Leha command.
+# needing "Hey Leha" again, for this many seconds (0 = off).
+#
+# Production default stays OFF until the wake detector + echo handling are
+# proven in real rooms. This prevents background conversation from becoming a
+# command after one successful Leha turn.
 FOLLOWUP_SECONDS = 0
+CONVERSATION_MAX_TURNS = 6
 
 # Voice-activity capture: stop recording after this much silence instead of
 # a fixed window. Tune SILENCE_RMS up if it cuts you off, down if it hangs.
@@ -398,10 +400,16 @@ SILENCE_RMS = 280            # int16 RMS threshold for "silence" (post-gain)
 
 # --- Ultra beat mode ---
 EARCON_ENABLED = True
-# Without acoustic echo cancellation, listening while Leha speaks can feed her
-# own reply back into the mic and create a second response. Keep this off until
-# an AEC-capable audio pipeline is installed.
+# Without validated acoustic echo cancellation, listening while Leha speaks can
+# feed her own reply back into the mic and create a second response. Keep this
+# OFF in production. The guarded barge-in code remains available for explicit
+# headset/AEC experiments.
 BARGE_IN_ENABLED = False
+# When True, echo self-trigger detection auto-disables barge-in for the session
+# after BARGE_IN_ECHO_LIMIT false interruptions inside BARGE_IN_ECHO_WINDOW_S.
+AUTO_DISABLE_BARGE_IN_ON_ECHO = True
+BARGE_IN_ECHO_LIMIT = 2
+BARGE_IN_ECHO_WINDOW_S = 60.0
 VAD_CALIBRATION_SECONDS = 1.5
 BARGE_IN_RMS_BOOST = 2.0
 ASSISTANT_EARCON_FREQ = 1200

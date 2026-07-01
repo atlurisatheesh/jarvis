@@ -48,6 +48,10 @@ try:
     from . import speech_manager
 except Exception:
     speech_manager = None  # type: ignore[assignment]
+try:
+    from .barge_in_guard import BargeInGuard
+except Exception:
+    BargeInGuard = None  # type: ignore[assignment]
 
 
 def _morning_brief(mouth):
@@ -119,6 +123,12 @@ class LehaSession:
         # Phase 2: shared latency budget for per-stage overrun tracking.
         self._budget = (latency_budget.get_latency_budget()
                         if latency_budget is not None else None)
+        # Phase A: self-protecting barge-in. Tracks echo self-triggers so a
+        # laptop-mic+speaker echo loop disables barge-in for the session.
+        self._barge_guard = BargeInGuard() if BargeInGuard is not None else None
+        # Effective barge-in state for this session. Copied from config so the
+        # guard can disable it without mutating the global config.
+        self._barge_in_enabled = bool(config.BARGE_IN_ENABLED)
         self.scheduler = Scheduler(
             # All replies must share the same speech controller. Routing the
             # scheduler and morning brief through self.speech (the central
@@ -150,6 +160,8 @@ class LehaSession:
             return
         set_last_reply(text)
         runtime.set("speaking")
+        if self._barge_guard is not None:
+            self._barge_guard.record_spoken(text)
         self.speech.say(text)
 
     def _heartbeat_loop(self):
@@ -161,6 +173,33 @@ class LehaSession:
                 f"age={snapshot['age_seconds']}s",
                 flush=True,
             )
+
+    def _should_barge_in(self, interrupt_text: str) -> bool:
+        """Decide if a wake/stop during speech is a genuine interrupt.
+
+        Returns False (ignore the interrupt, keep speaking) when:
+          * barge-in is disabled for this session, or
+          * the interrupt looks like Leha's echoed own voice (echo self-trigger).
+
+        When an echo self-trigger trips the guard's threshold, barge-in is
+        disabled for the rest of the session.
+        """
+        if not self._barge_in_enabled:
+            return False
+        if self._barge_guard is None:
+            return True
+        disabled_now = self._barge_guard.register_interrupt(interrupt_text)
+        if disabled_now:
+            self._barge_in_enabled = False
+            print(
+                "[barge-in] echo self-trigger detected — disabling barge-in "
+                "for this session (use a headset/USB mic to keep it on).",
+                flush=True,
+            )
+            return False
+        if self._barge_guard.disabled:
+            return False
+        return True
 
     def _handle_audio(self, audio, *, force_active: bool = False) -> bool:
         """Transcribe + handle one utterance. Returns True if quit requested."""
@@ -183,13 +222,18 @@ class LehaSession:
             print(f"[debug] heard: '{text}'", flush=True)
             low = normalize_text(text)
 
-            # With barge-in enabled, the mic remains available while Leha is
-            # speaking. A wake word or an explicit stop cancels speech first.
-            if self.speech.is_speaking() and config.BARGE_IN_ENABLED:
+            # With barge-in explicitly enabled, the mic remains available while
+            # Leha is speaking. Route every interruption through the guard so
+            # echoed TTS cannot create a self-trigger loop.
+            if self.speech.is_speaking() and self._barge_in_enabled:
                 if has_trigger(text) or low in {"stop", "pause", "cancel", "nevermind"}:
-                    print("[barge-in] interrupting TTS...", flush=True)
-                    self.speech.stop()
-                    time.sleep(0.12)
+                    if self._should_barge_in(text):
+                        print("[barge-in] interrupting TTS...", flush=True)
+                        self.speech.stop()
+                        time.sleep(0.12)
+                    else:
+                        runtime.set("speaking")
+                        return False
 
             # Speaker enrollment
             if has_trigger(text) and any(
@@ -225,7 +269,7 @@ class LehaSession:
             if result.reply:
                 if _streamed[0]:
                     # say_stream already started TTS — wait for last chunk to finish
-                    self.mouth.join(timeout=30)
+                    self.speech.join(timeout=30)
                 else:
                     # local reflex reply — speak it normally
                     runtime.provider("local_reflex")
@@ -254,7 +298,9 @@ class LehaSession:
         runtime.set("thinking")
         token_gen = self.brain.ask_stream(text)
         runtime.set("speaking")
-        spoken = self.mouth.say_stream(token_gen)
+        # Route through self.speech (SpeechManager) so generation tracking
+        # stays consistent and is_speaking() reflects reality.
+        spoken = self.speech.say_stream(token_gen)
         return spoken  # return full text so session can store it
 
     # ── Generic wake-engine runner (shared by Porcupine + OWW) ───────
@@ -264,7 +310,8 @@ class LehaSession:
         print(f"[wake/{engine_name}] active.", flush=True)
         try:
             for event in listener.stream_utterances(
-                should_mute=self.speech.is_speaking,
+                should_mute=(lambda: self.speech.is_speaking() and not self._barge_in_enabled),
+                barge_in_active=(self.speech.is_speaking if self._barge_in_enabled else None),
                 silence_ms=config.SILENCE_MS,
                 max_seconds=config.MAX_COMMAND_SECONDS,
                 min_samples=6000,
@@ -275,9 +322,12 @@ class LehaSession:
                 if event is None:
                     # Wake word detected
                     if self.speech.is_speaking():
-                        print("[barge-in] interrupting TTS...", flush=True)
-                        self.speech.stop()
-                        time.sleep(0.15)
+                        if self._should_barge_in(config.ASSISTANT_NAME):
+                            print("[barge-in] interrupting TTS...", flush=True)
+                            self.speech.stop()
+                            time.sleep(0.15)
+                        else:
+                            continue
                     _play_earcon("wake")
                     if config.SPEAK_WAKE_ACK:
                         self._say("Ready.")
@@ -325,8 +375,8 @@ class LehaSession:
 
         try:
             for audio in stream_utterances(
-                should_mute=(lambda: self.speech.is_speaking() and not config.BARGE_IN_ENABLED),
-                barge_in_active=self.mouth.is_speaking if config.BARGE_IN_ENABLED else None,
+                should_mute=(lambda: self.speech.is_speaking() and not self._barge_in_enabled),
+                barge_in_active=self.speech.is_speaking if self._barge_in_enabled else None,
                 start_rms=self.start_rms,
                 silence_ms=config.SILENCE_MS,
                 max_seconds=config.MAX_COMMAND_SECONDS,
@@ -380,7 +430,7 @@ class LehaSession:
             self._heartbeat_stop.set()
             runtime.set("offline")
             print(f"{config.ASSISTANT_NAME} offline.")
-            self.mouth.stop()
+            self.speech.stop()
 
 
 def main():

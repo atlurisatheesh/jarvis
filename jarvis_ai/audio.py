@@ -22,16 +22,59 @@ from . import config
 _SAVE_CAPTURE = True
 
 
+def _input_devices():
+    """Return ``(index, device)`` pairs for devices that can capture audio."""
+    try:
+        return [
+            (i, d) for i, d in enumerate(sd.query_devices())
+            if int(d.get("max_input_channels", 0)) > 0
+        ]
+    except Exception:
+        return []
+
+
+def _default_input_device():
+    """Best-effort OS default input index, or None if unavailable."""
+    try:
+        default = sd.default.device
+        idx = default[0] if isinstance(default, (list, tuple)) else default
+        if idx is not None and idx >= 0:
+            dev = sd.query_devices(int(idx))
+            if int(dev.get("max_input_channels", 0)) > 0:
+                return int(idx)
+    except Exception:
+        pass
+    return None
+
+
 def resolve_device(spec):
-    """int/None passthrough; string -> matching input device index (prefer MME)."""
-    if spec is None or isinstance(spec, int):
-        return spec
+    """Resolve configured mic to a valid input index.
+
+    ``sounddevice`` indices can change when a headset/Bluetooth device is
+    unplugged or Windows changes defaults. A stale integer index used to crash
+    with ``Invalid device``. We now keep the configured device when valid and
+    otherwise fall back to the OS default input, then the first input device.
+    """
+    inputs = _input_devices()
+    if spec is None:
+        default = _default_input_device()
+        return default if default is not None else (inputs[0][0] if inputs else None)
+    if isinstance(spec, int):
+        for i, _d in inputs:
+            if i == spec:
+                return spec
+        fallback = _default_input_device()
+        chosen = fallback if fallback is not None else (inputs[0][0] if inputs else None)
+        if chosen is not None:
+            print(f"[audio] configured mic device {spec} is unavailable; using input device {chosen}", flush=True)
+        return chosen
     hostapis = sd.query_hostapis()
     mme = next((i for i, h in enumerate(hostapis) if h["name"] == "MME"), None)
-    matches = [(i, d) for i, d in enumerate(sd.query_devices())
-               if d["max_input_channels"] > 0 and spec.lower() in d["name"].lower()]
+    matches = [(i, d) for i, d in inputs
+               if spec.lower() in d["name"].lower()]
     if not matches:
-        return None
+        fallback = _default_input_device()
+        return fallback if fallback is not None else (inputs[0][0] if inputs else None)
     for i, d in matches:
         if d["hostapi"] == mme:
             return i

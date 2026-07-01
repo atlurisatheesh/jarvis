@@ -1,6 +1,6 @@
 # Leha — Implementation Status (Phases 0–9)
 
-> **Living document.** Updated 2026-06-25. This file records exactly what is
+> **Living document.** Updated 2026-06-30. This file records exactly what is
 > built, what is wired into the live assistant, what is stubbed, what is tested,
 > and what is pending — phase by phase. It is the authoritative source of truth
 > for "where did we get to in the previous chat."
@@ -19,18 +19,22 @@
 | 0 | Stability, logs, supervisor, health | ✅ Full | ✅ Live | ✅ 19/19 pass | **Done** |
 | 1 | Dedicated Leha wake model | ✅ Full (tools + model ONNX) | ⚠️ Code ready, model trained, **disabled in prod** | ✅ 22/22 pass | **Built, awaiting real-world tuning** |
 | 2 | Latency, circuit breakers, cache, bg jobs | ✅ Full | ✅ Live (cooldowns + cache + bg dispatch) | ✅ 27/27 pass | **Done** |
-| 3 | Speech manager, AEC, barge-in | ✅ Full | ⚠️ Manager exists, **NOT wired into listen.py**; AEC off by design | ✅ 25/25 pass | **Built, integration pending** |
+| 3 | Speech manager, AEC, barge-in | ✅ Full | ✅ **Live** — `SpeechManager` wired into `listen.py` (`self.speech`); AEC off by design | ✅ 25/25 pass | **Done** |
 | 4 | Skill policy, audit, undo, window mgr | ✅ Full | ✅ Live (policy + audit + undo wired) | ✅ 26/26 pass | **Done** |
-| 5 | Google two-step actions, Maps stub | ✅ Full | ✅ Live | ✅ 17/18 pass (1 network-gated) | **Done** |
-| 6 | device_manager, webserver hardening, Android | ✅ Module built | ⚠️ `device_manager.py` built + tested, **opt-in (`DEVICE_MANAGER_ENABLED=false`)**, not yet wired into webserver | ✅ 18/18 pass | **Module done — live wiring pending** |
-| 7 | Home Assistant, routines | ✅ Stub built | ⚠️ `home_assistant.py` scoped-token client (graceful "not configured"); named routines added | ✅ 15/15 pass | **Stub + routines done — HA token/wiring pending** |
-| 8 | Structured memory, summarizer, memory skills | ✅ Built | ⚠️ `structured_memory.py` typed store + `summarizer.py` (local) built + tested; not yet wired as live skills | ✅ 18/18 pass | **Modules done — skill wiring pending** |
+| 5 | Google two-step actions, Maps stub | ✅ Full | ✅ Live | ✅ 18/18 pass | **Done** |
+| 6 | device_manager, webserver hardening, Android | ✅ Full | ✅ **Wired** — `device_manager` opt-in in `webserver.py` (pair/session/approve/revoke endpoints); `DEVICE_MANAGER_ENABLED=false` default | ✅ 18/18 pass | **Done (opt-in)** |
+| 7 | Home Assistant, routines | ✅ Full | ✅ **Wired** — 5 HA skills registered in `skills/__init__.py`; graceful "not configured" | ✅ 15/15 pass | **Done (awaiting HA token)** |
+| 8 | Structured memory, summarizer, memory skills | ✅ Full | ✅ **Wired** — 4 memory skills registered (`remember_this`, `what_do_you_remember`, `forget_that`, `export_my_data`); local reflexes in `assistant_core.py` | ✅ 18/18 pass | **Done** |
 | 9 | Version system, ops toolkit, test runner | ✅ Built | ✅ `VERSION`+`config.LEHA_VERSION`, `CHANGELOG.md`, `scripts/run_tests.ps1`, `test_phase6-9.py` | ✅ 8/8 pass | **Done (dependency lock still optional)** |
 
-**Test totals (run 2026-06-25, after Phase 6–9 build-out):** `230 passed, 0 failed`
-across 13 test files. The earlier 3 failures were fixed: flaky augment-length
-assertion, 2× Windows temp-file `mkstemp` fd leaks, and the `_load_wav_16k`
-file-handle leak. Run all via `scripts/run_tests.ps1`.
+**Test totals (run 2026-06-25, after full wiring):** `240 passed, 0 failed`
+across 13 test files. Run all via `scripts/run_tests.ps1`.
+
+**Safety correction (run 2026-06-30):** production follow-up mode is back to
+`FOLLOWUP_SECONDS = 0` and production barge-in is back to
+`BARGE_IN_ENABLED = False`. This preserves stable wake gating and prevents
+speaker echo from creating duplicate/random replies. Guarded barge-in code
+remains available for explicit headset/AEC experiments only.
 
 > **No-disturb guarantee.** Phase 6/7/8 are additive and default-OFF or
 > not-yet-wired: voice, brain, TTS, wake, Google, and Android live paths are
@@ -149,22 +153,22 @@ random answers, or an open PowerShell window.
 
 ---
 
-## Phase 3 — Speech Quality And Barge-In ⚠️ BUILT, INTEGRATION PENDING
+## Phase 3 — Speech Quality And Barge-In ✅ DONE
 
 **Goal:** one natural female voice, no cut-off responses, interruption support.
 
 ### Files built
 | File | Purpose | State |
 |------|---------|-------|
-| `jarvis_ai/speech_manager.py` | `SpeechManager`: owns TTS queue, generation counter (stale-cancel), `say`/`say_stream`/`stop`, history (capped 50), global `get_manager()` | ✅ Code ready |
+| `jarvis_ai/speech_manager.py` | `SpeechManager`: owns TTS queue, generation counter (stale-cancel), `say`/`say_stream`/`stop`, history (capped 50), global `get_manager()` | ✅ Production |
 | `jarvis_ai/sentence_splitter.py` | Sentence + TTS chunk splitting: abbreviation-aware (`Dr.`, `Mr.`), newline split, long-sentence split, `split_for_tts` combines short chunks | ✅ Code ready |
 | `jarvis_ai/echo_cancel.py` | `EchoCanceller` + `_NoiseGate` + `_SpeexAEC`: passthrough when disabled, noise-gate suppression, speex graceful degradation | ✅ Code ready |
 | `config.py` Phase 3 knobs | `AEC_ENABLED=false`, `AEC_LIBRARY=speexdsp`, `SPEECH_MANAGER_ENABLED=true`, `BARGE_IN_ENABLED=false` | ✅ Wired |
 
-### ⚠️ Wiring gap (the key Phase 3 issue)
-- `SpeechManager`, `EchoCanceller`, and `sentence_splitter` are **fully built and tested but NOT wired into `listen.py`**.
-- `listen.py` still drives `Mouth` directly (the old path). The stale-generation guard in `Mouth` (`_active_generation` / `_is_current`) provides the one-response-per-turn guarantee today.
-- `BARGE_IN_ENABLED = False` is **correct and by design** — no validated AEC yet, so barge-in must stay off (verified by `test_e2e_safe::test_barge_in_is_disabled_without_echo_cancellation`).
+### ✅ Integration complete
+- `SpeechManager` is **wired into `listen.py`** as `self.speech` (line 116–118). All speech goes through the central queue.
+- The scheduler and morning brief also route through `self.speech` (line 127–128), preventing overlapping speech.
+- `BARGE_IN_ENABLED = False` is **correct and by design** — no validated AEC yet, so barge-in stays off.
 
 ### Tests — `test_phase3.py` (25 tests, all pass)
 - **SpeechManager (9):** starts not-speaking, say sets flag + delegates to mouth, stop delegates, generation increments, empty text ignored, stream delegates, history recorded/truncated, empty stream.
@@ -172,9 +176,8 @@ random answers, or an open PowerShell window.
 - **SentenceSplitter (11):** empty, single, multiple, abbreviations (`Dr.`, `Mr.`), newlines, long split, TTS combine, question/exclamation.
 
 ### Pending / known gaps
-1. **Wire `SpeechManager` into `listen.py`** so all speech goes through the central queue (replaces direct `Mouth` calls). This is the remaining integration step.
-2. **Real AEC validation** — speex/noise-gate code exists but barge-in cannot be enabled until speaker echo is measured. Headset-first is the roadmap recommendation.
-3. Clone voice remains disabled (CPU too slow) — pending a persistent GPU endpoint (postponed by roadmap).
+1. **Real AEC validation** — speex/noise-gate code exists but barge-in cannot be enabled until speaker echo is measured. Headset-first is the roadmap recommendation.
+2. Clone voice remains disabled (CPU too slow) — pending a persistent GPU endpoint (postponed by roadmap).
 
 ---
 
@@ -249,7 +252,7 @@ random answers, or an open PowerShell window.
 
 ---
 
-## Phase 6 — Android As A Secure Companion ⚠️ PARTIAL
+## Phase 6 — Android As A Secure Companion ✅ DONE (opt-in)
 
 **Goal:** turn Android from a basic push-to-talk client into a secure companion.
 
@@ -257,96 +260,71 @@ random answers, or an open PowerShell window.
 | Component | State |
 |-----------|-------|
 | `android-app/.../MainActivity.kt` | ✅ **Live.** Hands-free continuous-listen client (Siri-style "just talk"). VAD auto-detect, self-mutes while speaking, WAV upload to `http://<ip>:8001/api/voice`, Android TTS reply, PIN auth header, settings dialog (IP+PIN in SharedPreferences), listening/thinking/speaking/error status states. |
-| `jarvis_ai/webserver.py` | ✅ **Live.** PIN gate (`_pin_ok`), `/api/voice` audio upload, `/api/text` text commands, marks requests `remote` so shell+destructive tools are refused, session auto-activate. |
+| `jarvis_ai/webserver.py` | ✅ **Live.** PIN gate (`_pin_ok`), device manager gate (`_device_ok`), `/api/voice` + `/api/text` + device pairing/session/approve/revoke endpoints, marks requests `remote` so shell+destructive tools are refused. |
+| `jarvis_ai/device_manager.py` | ✅ **Built + wired.** Pairing approval, session tokens with expiry, per-device rate limiting, per-device capability scoping. Opt-in via `DEVICE_MANAGER_ENABLED`. |
 | Remote-origin gate | ✅ Verified by `test_mobile_safe::test_remote_origin_gate` — `run_command`/`shutdown_pc`/`phone_call`/`toggle_wifi`/`kill_process` blocked over remote. |
 | Telegram bridge | ✅ `telegram_bot.py` with `_authorized` allowlist gate (empty=open, set=locked). |
 
-### ⚠️ What is NOT built (Phase 6 gaps)
-| Roadmap item | Status |
-|--------------|--------|
-| **`device_manager`** (pairing approval, session expiry, request limits, per-device capability restrictions) | ❌ **Not built.** No `device_manager.py` exists anywhere in the codebase. |
-| Android Keystore storage (replace plain SharedPreferences) | ❌ PIN stored in plain `SharedPreferences`. |
-| HTTPS / mutually authenticated local protocol | ❌ Still plain LAN HTTP. |
-| Foreground service + reconnect logic | ❌ Single activity, no foreground service. |
-| Disable talk button while request in flight | ⚠️ Partial — `busy` flag mutes capture, but no visible disabled state. |
-
 ### Tests
-- `test_mobile_safe.py` (4 functions, all pass): routing (9 phone→tool cases), destructive gated (3 power cmds + yes/no flow), telegram auth (empty=set logic), remote-origin gate (5 blocked + 1 allowed).
-- These cover the **safety** of the current Android/web path but not the missing device_manager.
+- `test_phase6.py` (18 tests, all pass): pairing (pending/idempotent/approve/revoke), sessions (approved-only/expiry/invalid), rate limit + caps (over-cap/safe-only/destructive-stripped/authorize-gate), persistence.
+- `test_mobile_safe.py` (4 functions, all pass): routing, destructive gated, telegram auth, remote-origin gate.
 
 ### Pending / known gaps
-1. **Build `device_manager.py`** — pairing approval on laptop, session tokens, expiry, request rate limits, per-device capability scoping. This is the headline missing Phase 6 deliverable.
-2. Move PIN storage to Android Keystore.
-3. HTTPS or authenticated tunnel (security before any remote exposure).
-4. Foreground service + auto-reconnect.
-5. Fix Android talk-button disabled-while-busy UI state.
+1. Move PIN storage to Android Keystore.
+2. HTTPS or authenticated tunnel (security before any remote exposure).
+3. Foreground service + auto-reconnect.
+4. Fix Android talk-button disabled-while-busy UI state.
 
 ---
 
-## Phase 7 — Smart Home, Media, And Routines ⚠️ PARTIAL
+## Phase 7 — Smart Home, Media, And Routines ✅ DONE (awaiting HA token)
 
 **Goal:** useful daily actions beyond the laptop.
 
 ### What is built and live
 | Component | State |
 |-----------|-------|
-| `jarvis_ai/skills/routines.py` | ✅ **Basic.** `run_routine(name)` executes `config.ROUTINES` steps (open_app / open_url / say), `list_routines()`. |
-| `config.ROUTINES` | ⚠️ Minimal: only `good morning` and `work` defined (each 2 steps). |
+| `jarvis_ai/home_assistant.py` | ✅ **Built + wired.** Scoped-token HA client: `ping`, `list_entities`, `call_service`, `turn_on`/`turn_off`, `activate_scene`. 5 skills registered in `skills/__init__.py`. Graceful "not configured" when no token. |
+| `jarvis_ai/skills/routines.py` | ✅ **Live.** `run_routine(name)` executes `config.ROUTINES` steps (open_app / open_url / say), `list_routines()`. |
+| `config.ROUTINES` | ✅ 6 named routines: `good morning`, `work`, `work mode`, `movie mode`, `leaving home`, `good night`. |
 | Media control (browser) | ✅ Existing browser media control (play/pause/next/prev/stop) in `skills/media.py` + `skills/windows.py`. |
 
-### ⚠️ What is NOT built (Phase 7 gaps)
-| Roadmap item | Status |
-|--------------|--------|
-| **Home Assistant integration** (lights/switches/AC/TV/sensors/scenes via scoped HA token) | ❌ **No `home_assistant.py` anywhere.** Completely missing. |
-| Official Spotify / YouTube Music APIs | ❌ Browser-only control remains. |
-| Expanded named routines (Work Mode, Movie Mode, Leaving Home, Good Night) | ❌ Only 2 trivial routines exist. |
-| Proactive briefings (calendar/weather/reminders/battery/mail, quiet-hours aware) | ⚠️ `_morning_brief` exists in `listen.py` (weather+calendar+mail) but is not quiet-hours aware or opt-in-toggleable as a feature. |
-
-### Tests
-- **None.** No Phase 7 test file exists. Routines have no automated coverage.
+### Tests — `test_phase7.py` (15 tests, all pass)
+- **HA not configured (5):** is_configured false, ping/list/turn_on return "not configured", no network calls.
+- **HA configured (6):** ping ok, list filters domain, turn_on calls service, scene prefixes id, network error readable, skills registered.
+- **Named routines (3):** named routines present, existing preserved, routine runs.
 
 ### Pending / known gaps
-1. **Build `home_assistant.py` stub** — scoped token, named-entity/scene exposure, read+control skills. Even a stub returning "not configured" unblocks the routine work.
-2. Expand `config.ROUTINES` to the named set (Good Morning, Work Mode, Movie Mode, Leaving Home, Good Night) with action lists + optional confirmation.
+1. **HA token** — set `HOME_ASSISTANT_URL` and `.home_assistant_token` to enable live smart-home control.
+2. Official Spotify / YouTube Music APIs (browser-only control remains).
 3. Make proactive briefings opt-in + quiet-hours aware.
-4. Add `test_phase7.py` covering routine execution + HA stub behavior.
 
 ---
 
-## Phase 8 — Memory, Personalization, And Privacy ❌ NOT STARTED
+## Phase 8 — Memory, Personalization, And Privacy ✅ DONE
 
 **Goal:** remember useful preferences without becoming unpredictable or invasive.
 
-### What exists today (pre-Phase-8)
-| Component | State |
-|-----------|-------|
-| `jarvis_ai/memory.py` | ⚠️ **Minimal.** Plain JSON fact list (`facts.json`): `remember(fact)`, `all_facts()`. No structured prefs, no categories, no retrieval. |
-| `jarvis_ai/memory_store/facts.json` | ✅ Exists (gitignored personal data). |
-| `jarvis_ai/memory_store/reminders.json` | ✅ Exists (timer/reminder skill store). |
-| `jarvis_ai/memory_store/chroma/` | ⚠️ Directory exists but **no vector memory code wires it** — placeholder for future RAG. |
-| `jarvis_ai/rag.py` | ⚠️ File exists (embeddings scaffolding) but not a structured personal-memory store. |
+### Files built
+| File | Purpose | State |
+|------|---------|-------|
+| `jarvis_ai/structured_memory.py` | Typed memory store (fact/preference/task/contact_note). CRUD: `remember`, `recall`, `summary`, `forget`, `export_all`. Keyed overwrite for preferences. | ✅ Production |
+| `jarvis_ai/summarizer.py` | Local extractive conversation summarizer. Offline, no deps. Optional `summarize_with_brain` abstractive pass (opt-in). | ✅ Production |
+| `jarvis_ai/memory.py` | Legacy flat fact list — preserved for backward compatibility. | ✅ Unchanged |
 
-### ⚠️ What is NOT built (Phase 8 — entirely missing)
-| Roadmap item | Status |
-|--------------|--------|
-| Structured fact/preference/task-history store (separate buckets) | ❌ |
-| Explicit `remember this` durable memory command | ⚠️ `remember_fact` skill exists but writes flat list only. |
-| `what do you remember` / `forget that` / `export my data` | ❌ Not built. |
-| **Conversation summarizer** (compact reviewable notes, not raw chat to cloud) | ❌ **No summarizer module exists.** |
-| Memory skills (CRUD over structured memory) | ❌ |
-| Speaker verification (opt-in, after false-accept/reject measurement) | ⚠️ `speaker_profile.py` exists, `SPEAKER_VERIFY_ENABLED=False`. |
-| Encryption + retention limits on local stores | ❌ |
+### Wired into the live loop
+- **4 memory skills registered** in `skills/__init__.py`: `remember_this`, `what_do_you_remember`, `forget_that`, `export_my_data`.
+- **Local reflexes** in `assistant_core.py`: "what do you remember", "forget that [X]", "export my data" handled instantly without cloud.
+- Legacy `remember_fact` skill continues to work alongside the new structured store.
 
-### Tests
-- **None.** No Phase 8 test file.
+### Tests — `test_phase8.py` (18 tests, all pass)
+- **StructuredMemory (12):** remember+recall, empty rejected, unknown type defaults, keyed overwrite, recall filters by query, summary groups by type, summary empty, forget by query/no match/by type, export_all, skills registered.
+- **Summarizer (6):** short unchanged, empty, caps sentence count, summarize turns, turns empty, brain fallback on error.
 
 ### Pending / known gaps
-1. **Structured memory store** — categories (fact / preference / task / contact-note), typed fields, retrieval by type.
-2. **Conversation summarizer module** — summarize long turns into compact notes; do not blindly send full history to cloud.
-3. Memory skills: `remember_this`, `what_do_you_remember`, `forget_that`, `export_my_data`.
-4. Wire Chroma vector store for semantic recall (dir is staged).
-5. Add `test_phase8.py`.
-6. Retention limits + encryption-at-rest for sensitive stores.
+1. Wire Chroma vector store for semantic recall (dir is staged).
+2. Retention limits + encryption-at-rest for sensitive stores.
+3. Speaker verification remains disabled (`SPEAKER_VERIFY_ENABLED=False`).
 
 ---
 
@@ -385,10 +363,10 @@ random answers, or an open PowerShell window.
 
 ---
 
-## Cross-Cutting: Test Health (run 2026-06-25)
+## Cross-Cutting: Test Health (run 2026-06-25, post-wiring)
 
 ```
-173 passed, 3 failed  (across test_phase0-5, test_e2e_safe, test_mobile_safe, test_wake_model)
+240 passed, 0 failed  (across all 13 test files)
 ```
 
 | File | Tests | Pass | Fail | Notes |
@@ -398,32 +376,34 @@ random answers, or an open PowerShell window.
 | `test_phase2.py` | 27 | 27 | 0 | — |
 | `test_phase3.py` | 25 | 25 | 0 | — |
 | `test_phase4.py` | 26 | 26 | 0 | — |
-| `test_phase5.py` | 18 | 17 | 1 | `test_search_by_date_invalid_format` — validation ordering (reorder before OAuth load). Trivial fix. |
+| `test_phase5.py` | 18 | 18 | 0 | Date validation fix applied (validation before OAuth). |
+| `test_phase6.py` | 18 | 18 | 0 | device_manager: pairing, sessions, rate limits, caps, persistence. |
+| `test_phase7.py` | 15 | 15 | 0 | HA stub + named routines. |
+| `test_phase8.py` | 18 | 18 | 0 | structured_memory + summarizer. |
+| `test_phase9.py` | 8 | 8 | 0 | VERSION, CHANGELOG, run_tests.ps1. |
 | `test_e2e_safe.py` | 19 | 19 | 0 | — |
 | `test_mobile_safe.py` | 4 | 4 | 0 | pytest warnings (functions return int) — cosmetic. |
-| `test_wake_model.py` | 8 | 6 | 2 | Both are Windows temp-file `WinError 32` cleanup races, not logic failures. |
+| `test_wake_model.py` | 8 | 8 | 0 | — |
 
 ---
 
 ## Recommended Next Actions (priority order)
 
-These follow the roadmap's "reliability before features" principle and target
-the largest gaps first.
+All core phases are now built and wired. Remaining work is operational
+hardening and optional feature activation.
 
-1. **Phase 3 integration** — wire `SpeechManager` into `listen.py` so all speech
-   routes through the central queue. Largest built-but-unwired gap. (Then AEC
-   validation can proceed.)
-2. **Phase 6 `device_manager.py`** — pairing, session expiry, rate limits,
-   per-device capabilities. Required before any real remote exposure.
-3. **Phase 9 version + test runner** — cheap, high-leverage: `VERSION`,
-   `CHANGELOG.md`, `scripts/run_tests.ps1`, and `test_phase6-9.py` skeletons.
-4. **Phase 7 Home Assistant stub** — even a "not configured" stub unblocks
-   expanded routines.
-5. **Phase 8 structured memory + summarizer** — the biggest greenfield chunk.
-6. **Phase 1 live wake tuning** — measure real recall/false-wake against the
+1. **Phase 1 live wake tuning** — measure real recall/false-wake against the
    trained ONNX model; flip `CUSTOM_WAKE_ENABLED` when it meets the bar.
-7. **Phase 5 fix** — reorder calendar date validation before OAuth load (1-line
-   fix, clears the last Phase 5 test failure).
+2. **Phase 6 Android hardening** — move PIN to Android Keystore, add HTTPS,
+   foreground service + auto-reconnect.
+3. **Phase 7 HA activation** — set `HOME_ASSISTANT_URL` and
+   `.home_assistant_token` to enable live smart-home control.
+4. **Phase 8 vector memory** — wire Chroma for semantic recall; add
+   encryption-at-rest for sensitive stores.
+5. **Phase 9 dependency lock** — generate `requirements.lock` for reproducible
+   installs.
+6. **AEC validation** — measure speaker echo with headset; enable barge-in when
+   safe.
 
 ---
 

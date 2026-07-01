@@ -36,8 +36,19 @@ def check_ollama():
 def check_mic():
     try:
         import sounddevice as sd
+        from jarvis_ai import config
+        from jarvis_ai.audio import resolve_device
         ins = [d["name"] for d in sd.query_devices() if d["max_input_channels"] > 0]
         print(f"  [ok] Input devices: {ins[:3] or 'NONE FOUND'}")
+        resolved = resolve_device(config.MIC_DEVICE)
+        if resolved is None:
+            print(f"  [FAIL] configured mic {config.MIC_DEVICE!r} could not resolve to an input device")
+            return False
+        try:
+            name = sd.query_devices(resolved)["name"]
+        except Exception:
+            name = "unknown"
+        print(f"  [ok] Leha mic: device {resolved} - {name}")
         return bool(ins)
     except Exception as e:
         print(f"  [FAIL] mic query: {e}")

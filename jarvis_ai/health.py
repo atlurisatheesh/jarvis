@@ -51,17 +51,18 @@ def check() -> dict:
     # --- mic ---
     try:
         import sounddevice as sd
+        from .audio import resolve_device
         ins = [d for d in sd.query_devices() if d["max_input_channels"] > 0]
         r["mic_inputs"] = len(ins)
         configured = config.MIC_DEVICE
-        if isinstance(configured, int):
-            devices = sd.query_devices()
-            valid = 0 <= configured < len(devices) and devices[configured]["max_input_channels"] > 0
-        elif configured:
-            valid = any(str(configured).lower() in d["name"].lower() for d in ins)
-        else:
-            valid = bool(ins)
-        r["mic_configured"] = _ok(valid)
+        resolved = resolve_device(configured)
+        r["mic_configured"] = _ok(resolved is not None)
+        r["mic_resolved_index"] = resolved if resolved is not None else "none"
+        if resolved is not None:
+            try:
+                r["mic_resolved_name"] = sd.query_devices(resolved)["name"]
+            except Exception:
+                r["mic_resolved_name"] = "unknown"
     except Exception as e:
         r["mic_inputs"] = 0; r["mic_configured"] = f"error: {e}"
 

@@ -12,7 +12,8 @@ front ends.
 
 - Assistant name and wake phrase: `Leha`.
 - Always-on native listener through `python -m jarvis_ai.main`.
-- Wake/session flow: wake phrase -> command -> short follow-up window.
+- Wake/session flow: wake phrase -> command. Follow-up mode is currently off
+  for stability, so normal commands must include `Leha`.
 - Fuzzy wake phrase matching for common transcription variations.
 - Dynamic microphone noise calibration and voice activity detection.
 - Deepgram speech-to-text as the preferred cloud ears provider.
@@ -35,6 +36,8 @@ front ends.
 - Clone worker cancellation code exists for future clone mode.
 - Barge-in is disabled by default because the laptop does not yet have real
   acoustic echo cancellation.
+- Guarded barge-in code exists for later headset/AEC experiments, but it is
+  not part of the live production path today.
 
 ### Computer Control
 
@@ -93,6 +96,7 @@ Clone voice:      Disabled for live use
 Brain:            Local Ollama qwen2.5:3b
 Wake ack speech:  Disabled to avoid delayed clone acknowledgements
 Barge-in:         Disabled until echo cancellation exists
+Follow-up mode:   Disabled; say Leha for each normal command
 Google OAuth:     Connected locally
 ```
 

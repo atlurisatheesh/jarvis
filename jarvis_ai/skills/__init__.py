@@ -24,6 +24,42 @@ for _m in _modules:
         TOOLS.append({"type": "function", "function": _schema})
         DISPATCH[_schema["name"]] = _fn
 
+# Phase 7: Home Assistant skills (graceful "not configured" when no token).
+try:
+    from .. import home_assistant as _ha
+    for _schema, _fn in _ha.SKILLS:
+        TOOLS.append({"type": "function", "function": _schema})
+        DISPATCH[_schema["name"]] = _fn
+except Exception:
+    pass
+
+# Phase 8: structured memory skills (remember_this, what_do_you_remember,
+# forget_that) plus an export_my_data convenience wrapper.
+try:
+    from .. import structured_memory as _sm
+
+    def _export_my_data(**_kwargs) -> str:
+        """Export all stored personal memories as JSON."""
+        import json as _json
+        data = _sm.export_all()
+        if not data:
+            return "No personal data stored, Sir."
+        return _json.dumps(data, ensure_ascii=False, indent=2)
+
+    for _schema, _fn in _sm.SKILLS:
+        TOOLS.append({"type": "function", "function": _schema})
+        DISPATCH[_schema["name"]] = _fn
+
+    _export_schema = {
+        "name": "export_my_data",
+        "description": "Export all stored personal memories as JSON for review or backup.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    TOOLS.append({"type": "function", "function": _export_schema})
+    DISPATCH["export_my_data"] = _export_my_data
+except Exception:
+    pass
+
 
 # ── Origin-based safety gate ──────────────────────────────────────────
 # Voice on the laptop is trusted ("local"). Remote front ends (web/PWA,

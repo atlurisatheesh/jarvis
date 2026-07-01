@@ -56,11 +56,28 @@ class SpeechManager:
             self._speaking = False
             self._speak_thread = None
 
+    def _wait_for_mouth_done(self, generation: int, timeout: float | None = None):
+        """Clear manager speech state after the underlying Mouth finishes."""
+        try:
+            self._mouth.join(timeout=timeout if timeout is not None else 120.0)
+        except Exception:
+            pass
+        with self._lock:
+            if generation == self._active_generation:
+                self._speaking = False
+                self._speak_thread = None
+
     # -- public API ----------------------------------------------------------
 
     def is_speaking(self) -> bool:
         """True if speech is currently being generated/played."""
+        try:
+            mouth_speaking = bool(self._mouth.is_speaking())
+        except Exception:
+            mouth_speaking = False
         with self._lock:
+            if self._speaking and not mouth_speaking and self._speak_thread is None:
+                self._speaking = False
             return self._speaking
 
     def stop(self):
@@ -74,12 +91,21 @@ class SpeechManager:
             pass
 
     def join(self, timeout: float | None = None):
-        """Wait for the current speech thread to finish."""
-        thread = None
-        with self._lock:
-            thread = self._speak_thread
-        if thread and thread.is_alive():
-            thread.join(timeout=timeout)
+        """Wait for the current speech thread to finish.
+
+        Delegates to the underlying Mouth, which owns the actual playback
+        thread(s). The manager coordinates *generation* (which turn is
+        current); Mouth coordinates *thread lifecycle*.
+        """
+        try:
+            self._mouth.join(timeout=timeout if timeout is not None else 30.0)
+        except Exception:
+            pass
+        try:
+            if not self._mouth.is_speaking():
+                self._clear_active()
+        except Exception:
+            pass
 
     def say(self, text: str, wait: bool = False):
         """Speak *text*, interrupting any current speech.
@@ -98,11 +124,18 @@ class SpeechManager:
         try:
             self._mouth.say(text, wait=wait)
         finally:
-            if not wait:
-                # Mouth.say already started a background thread; we track it.
-                pass
             if wait:
                 self._clear_active()
+            else:
+                watcher = threading.Thread(
+                    target=self._wait_for_mouth_done,
+                    args=(generation,),
+                    daemon=True,
+                )
+                with self._lock:
+                    if generation == self._active_generation:
+                        self._speak_thread = watcher
+                watcher.start()
 
     def say_stream(self, token_gen) -> str:
         """Stream tokens to TTS via ``Mouth.say_stream``.

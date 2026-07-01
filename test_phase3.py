@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import MagicMock
+import threading
+import time
 
 import numpy as np
 
@@ -69,6 +71,36 @@ class TestSpeechManager(unittest.TestCase):
         self.mock_mouth.say_stream = MagicMock(return_value="")
         result = self.sm.say_stream(iter([]))
         self.assertEqual(result, "")
+
+    def test_say_clears_speaking_after_mouth_finishes(self):
+        class FakeMouth:
+            def __init__(self):
+                self.done = threading.Event()
+                self.speaking = False
+
+            def say(self, _text, wait=False):
+                self.speaking = True
+                self.done.set()
+
+            def join(self, timeout=None):
+                self.done.wait(timeout)
+                self.speaking = False
+
+            def is_speaking(self):
+                return self.speaking
+
+            def stop(self):
+                self.speaking = False
+                self.done.set()
+
+        from jarvis_ai.speech_manager import SpeechManager
+        sm = SpeechManager(FakeMouth())
+        sm.say("hello")
+        for _ in range(20):
+            if not sm.is_speaking():
+                break
+            time.sleep(0.01)
+        self.assertFalse(sm.is_speaking())
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +212,49 @@ class TestSentenceSplitter(unittest.TestCase):
         from jarvis_ai.sentence_splitter import split_sentences
         result = split_sentences("What time is it? It's noon! Okay.")
         self.assertEqual(len(result), 3)
+
+
+# ---------------------------------------------------------------------------
+# SpeechManager wiring (singleton + adapter)
+# ---------------------------------------------------------------------------
+
+class TestSpeechManagerWiring(unittest.TestCase):
+    """Tests for the module-level get_manager() wiring into the live loop."""
+
+    def tearDown(self):
+        # Reset the singleton so each test starts clean.
+        import jarvis_ai.speech_manager as _sm
+        _sm._manager = None
+
+    def test_get_manager_returns_speech_manager(self):
+        from jarvis_ai.speech_manager import get_manager, SpeechManager
+        mock_mouth = MagicMock()
+        manager = get_manager(mock_mouth)
+        self.assertIsInstance(manager, SpeechManager)
+
+    def test_get_manager_returns_same_singleton(self):
+        from jarvis_ai.speech_manager import get_manager
+        mock_mouth = MagicMock()
+        a = get_manager(mock_mouth)
+        b = get_manager()
+        self.assertIs(a, b)
+
+    def test_get_manager_delegates_to_mouth(self):
+        from jarvis_ai.speech_manager import get_manager
+        mock_mouth = MagicMock()
+        manager = get_manager(mock_mouth)
+        manager.say("hello")
+        mock_mouth.say.assert_called_once_with("hello", wait=False)
+
+    def test_get_manager_none_without_mouth(self):
+        from jarvis_ai.speech_manager import get_manager
+        result = get_manager(mouth=None)
+        self.assertIsNone(result)
+
+    def test_listen_imports_cleanly(self):
+        """listen.py must import without errors (modules are lazily imported)."""
+        import jarvis_ai.listen
+        self.assertTrue(hasattr(jarvis_ai.listen, "LehaSession"))
 
 
 if __name__ == "__main__":
