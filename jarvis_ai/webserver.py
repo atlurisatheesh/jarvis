@@ -25,6 +25,7 @@ print("[web] loading STT + brain ...")
 ears = Ears()
 brain = Brain()
 session = AssistantSession()
+mobile_voice_session = AssistantSession()
 _WEB_DIR = Path(__file__).parent / "web"
 _HTML = (_WEB_DIR / "index.html").read_text(encoding="utf-8")
 
@@ -63,22 +64,27 @@ def _device_ok(request: Request) -> tuple[bool, str]:
     return allowed, reason
 
 
-def _route(text: str):
+def _route(text: str, *, explicit: bool = True):
     """Full pipeline: reflexes first, then brain. Same as voice listener.
 
-    Every web/phone message is an explicit command, so activate the session
-    (no wake word needed over the network). Marked 'remote' so shell and
-    destructive tools are refused even if the brain calls them.
+    Marked 'remote' so shell and destructive tools are refused even if the
+    brain calls them. Browser/text messages are explicit by default. Native
+    Android microphone traffic can pass explicit=False so background speech
+    still has to satisfy the Leha wake/session gate.
     """
     from . import skills as _skills
     _skills.set_origin("remote")
-    session.activate()
-    result = session.handle(text, brain.ask)
+    active_session = session if explicit else mobile_voice_session
+    if explicit:
+        active_session.activate()
+    result = active_session.handle(text, brain.ask)
     if result.ignored_reason and not result.reply:
+        if not explicit:
+            return text, "", False, result.ignored_reason
         reply = brain.ask(text) or "..."
         set_last_reply(reply)
-        return text, reply, True
-    return result.heard, (result.reply or "Done, Sir."), result.acted
+        return text, reply, True, ""
+    return result.heard, (result.reply or "Done, Sir."), result.acted, result.ignored_reason
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -108,6 +114,45 @@ def icon():
 def health():
     from . import health as _h
     return JSONResponse(_h.check())
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    """Owner safety dashboard. API calls below still require the PIN."""
+    return HTMLResponse((_WEB_DIR / "dashboard.html").read_text(encoding="utf-8"))
+
+
+@app.get("/api/pro/status")
+def pro_status(request: Request):
+    if not _pin_ok(request):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    from . import pro_ops
+    return JSONResponse(pro_ops.dashboard_status())
+
+
+@app.post("/api/pro/settings")
+async def pro_settings(request: Request):
+    if not _pin_ok(request):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    body = await request.json()
+    from . import pro_ops
+    return JSONResponse(pro_ops.update_owner_settings(body))
+
+
+@app.get("/api/logs/recent")
+def logs_recent(request: Request, limit: int = 80):
+    if not _pin_ok(request):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    from . import pro_ops
+    return JSONResponse({"lines": pro_ops.recent_logs(limit)})
+
+
+@app.get("/api/audit/recent")
+def audit_recent(request: Request, limit: int = 20):
+    if not _pin_ok(request):
+        return JSONResponse({"error": "PIN required."}, status_code=401)
+    from . import pro_ops
+    return JSONResponse(pro_ops.audit_summary(max(1, min(limit, 100))))
 
 
 @app.post("/api/auth")
@@ -213,10 +258,16 @@ async def voice(request: Request, audio: UploadFile = File(...)):
             pass
 
     if not heard:
-        return JSONResponse({"heard": "", "reply": "", "acted": False})
+        return JSONResponse({"heard": "", "reply": "", "acted": False, "ignored_reason": "empty"})
 
-    heard, reply, acted = _route(heard)
-    return JSONResponse({"heard": heard, "reply": reply, "acted": acted})
+    explicit = (request.headers.get("X-Leha-Client") or "").lower() != "android"
+    heard, reply, acted, ignored_reason = _route(heard, explicit=explicit)
+    return JSONResponse({
+        "heard": heard,
+        "reply": reply,
+        "acted": acted,
+        "ignored_reason": ignored_reason,
+    })
 
 
 @app.post("/api/text")
@@ -230,8 +281,8 @@ async def text(req: Request):
     msg = (body.get("text") or "").strip()
     if not msg:
         return JSONResponse({"heard": "", "reply": "Say something, Sir."})
-    heard, reply, acted = _route(msg)
-    return JSONResponse({"heard": heard, "reply": reply, "acted": acted})
+    heard, reply, acted, ignored_reason = _route(msg, explicit=True)
+    return JSONResponse({"heard": heard, "reply": reply, "acted": acted, "ignored_reason": ignored_reason})
 
 
 def main():

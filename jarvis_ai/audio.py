@@ -19,7 +19,7 @@ from scipy.signal import resample_poly
 from . import config
 
 # Set True to write every captured utterance to cap.wav for debugging.
-_SAVE_CAPTURE = True
+_SAVE_CAPTURE = False
 
 
 def _input_devices():

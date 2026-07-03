@@ -8,6 +8,7 @@ the threshold before triggering (anti-false-positive).
 from __future__ import annotations
 
 import collections
+import json
 import math
 import os
 import queue
@@ -31,6 +32,20 @@ def is_available() -> bool:
     path = getattr(config, "CUSTOM_WAKE_MODEL_PATH", "").strip()
     if not path or not os.path.isfile(path):
         return False
+    # Active safety gate: require an approved evaluation report unless the owner
+    # explicitly sets CUSTOM_WAKE_FORCE_UNAPPROVED=true for tuning.
+    if (
+        getattr(config, "CUSTOM_WAKE_REQUIRE_APPROVAL", True)
+        and not getattr(config, "CUSTOM_WAKE_FORCE_UNAPPROVED", False)
+    ):
+        report_path = getattr(config, "CUSTOM_WAKE_EVAL_REPORT", "").strip()
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+            if not report.get("approved", False):
+                return False
+        except Exception:
+            return False
     try:
         import onnxruntime  # noqa: F401
         return True
@@ -60,7 +75,9 @@ class LocalOnnxWakeListener:
 
         path = config.CUSTOM_WAKE_MODEL_PATH
         self._session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-        self._input = self._session.get_inputs()[0].name
+        model_input = self._session.get_inputs()[0]
+        self._input = model_input.name
+        self._input_rank = len(model_input.shape)
         self._threshold = float(getattr(config, "CUSTOM_WAKE_THRESHOLD", 0.92))
         self._cooldown_sec = float(getattr(config, "WAKE_COOLDOWN_SECONDS", 4))
         self._conf_log_path = getattr(config, "WAKE_CONFIDENCE_LOG", "").strip()
@@ -84,7 +101,12 @@ class LocalOnnxWakeListener:
     # -----------------------------------------------------------------------
 
     def _score(self, audio: np.ndarray) -> float:
-        value = self._session.run(None, {self._input: audio[None, None, :].astype(np.float32)})[0]
+        payload = audio.astype(np.float32)
+        if self._input_rank == 3:
+            payload = payload[None, None, :]
+        else:
+            payload = payload[None, :]
+        value = self._session.run(None, {self._input: payload})[0]
         logit = float(np.asarray(value).reshape(-1)[0])
         prob = 1.0 / (1.0 + math.exp(-logit))
         self._score_count += 1
@@ -105,10 +127,12 @@ class LocalOnnxWakeListener:
     def stream_utterances(
         self,
         should_mute=None,
+        barge_in_active=None,
         silence_ms: int = 900,
         max_seconds: float = 12.0,
         min_samples: int = 6000,
         start_rms: float = 180.0,
+        session_active=None,
     ):
         dev = resolve_device(config.MIC_DEVICE)
         last_error = None
@@ -147,8 +171,9 @@ class LocalOnnxWakeListener:
                 while True:
                     raw = incoming.get().flatten().astype(np.float32)
                     if discard_after_wake:
-                        # The generator pauses while Leha says "Ready.". Drop
-                        # those queued speaker frames before hearing the command.
+                        # The generator may pause for an activation sound or
+                        # optional wake acknowledgement. Drop queued speaker
+                        # frames before hearing the command.
                         while not incoming.empty():
                             try:
                                 incoming.get_nowait()
@@ -158,8 +183,9 @@ class LocalOnnxWakeListener:
                         continue
                     if should_mute and should_mute():
                         rolling = np.zeros(0, dtype=np.float32)
-                        pre.clear(); command = []; woken = started = False
+                        pre.clear(); command = []; started = False
                         silent = wait = hits = 0
+                        # Don't reset woken — preserve follow-up state after TTS
                         continue
 
                     if not woken:
@@ -203,9 +229,16 @@ class LocalOnnxWakeListener:
                             silent += 1
                             if silent >= silence_need or len(command) >= max_blocks:
                                 audio = _resample(np.concatenate(command), native)
-                                command = []; woken = started = False; silent = 0
+                                command = []; started = False; silent = 0
                                 if len(audio) >= min_samples:
                                     yield np.clip(audio, -32768, 32767).astype(np.int16)
+                                # After yielding: stay in command-capture mode if
+                                # the session follow-up window is still open.
+                                if session_active and session_active():
+                                    wait = 0
+                                    # Stay woken — ready for the next follow-up utterance
+                                else:
+                                    woken = False
             finally:
                 stream.stop(); stream.close()
         raise RuntimeError(f"Could not open microphone: {last_error}")

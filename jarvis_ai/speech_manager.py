@@ -76,8 +76,9 @@ class SpeechManager:
         except Exception:
             mouth_speaking = False
         with self._lock:
-            if self._speaking and not mouth_speaking and self._speak_thread is None:
+            if self._speaking and not mouth_speaking:
                 self._speaking = False
+                self._speak_thread = None
             return self._speaking
 
     def stop(self):

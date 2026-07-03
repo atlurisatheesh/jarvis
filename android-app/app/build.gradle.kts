@@ -37,4 +37,8 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // On-device wake word (offline after first-run key validation).
+    // Low-level Porcupine engine feeds from our own AudioRecord loop so the
+    // wake detector and command capture share one mic instead of competing.
+    implementation("ai.picovoice:porcupine-android:2.1.0")
 }

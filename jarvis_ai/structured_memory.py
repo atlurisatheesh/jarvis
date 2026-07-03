@@ -61,6 +61,15 @@ def remember(text: str, mem_type: str = "fact", key: str = "") -> str:
                     e["text"] = text
                     e["created_at"] = time.time()
                     _save(entries)
+                    try:
+                        from . import semantic_memory
+                        semantic_memory.remember_text_background(
+                            text,
+                            kind=f"memory:{mem_type}",
+                            metadata={"key": key or ""},
+                        )
+                    except Exception:
+                        pass
                     return f"Updated {mem_type} '{key}', Sir."
         entries.append({
             "id": uuid.uuid4().hex[:12],
@@ -70,7 +79,35 @@ def remember(text: str, mem_type: str = "fact", key: str = "") -> str:
             "created_at": time.time(),
         })
         _save(entries)
+    try:
+        from . import semantic_memory
+        semantic_memory.remember_text_background(
+            text,
+            kind=f"memory:{mem_type}",
+            metadata={"key": key or ""},
+        )
+    except Exception:
+        pass
     return f"Noted that {mem_type}, Sir."
+
+
+def semantic_recall(query: str, limit: int = 3) -> str:
+    """Recall memories by meaning using the Chroma-backed semantic store."""
+    query = (query or "").strip()
+    if not query:
+        return "What should I search my memory for, Sir?"
+    try:
+        from . import semantic_memory
+        docs = semantic_memory.recall(query, k=limit)
+    except Exception:
+        docs = []
+    if not docs:
+        # Fall back to exact JSON search when embeddings are unavailable.
+        exact = recall(query=query)
+        docs = [e.get("text", "") for e in exact]
+    if not docs:
+        return "I did not find anything matching that memory, Sir."
+    return "I remember: " + "; ".join(docs[:limit])
 
 
 def recall(mem_type: str = "", query: str = "") -> list[dict]:
@@ -147,6 +184,12 @@ SKILLS = [
       "description": "List stored personal memories, optionally filtered by type.",
       "parameters": {"type": "object",
                      "properties": {"mem_type": {"type": "string"}}}}, summary),
+    ({"name": "semantic_memory_recall",
+      "description": "Search stored memories and past conversation by meaning.",
+      "parameters": {"type": "object",
+                     "properties": {"query": {"type": "string"},
+                                    "limit": {"type": "integer"}},
+                     "required": ["query"]}}, semantic_recall),
     ({"name": "forget_that",
       "description": "Delete a stored personal memory matching a query or type.",
       "parameters": {"type": "object",

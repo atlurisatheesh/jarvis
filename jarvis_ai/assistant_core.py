@@ -42,13 +42,63 @@ APP_ALIASES = {
     "youtube": "https://www.youtube.com",
     "you tube": "https://www.youtube.com",
     "google": "https://www.google.com",
+    "maps": "https://www.google.com/maps",
+    "google maps": "https://www.google.com/maps",
     "gmail": "https://mail.google.com",
     "chrome": "chrome",
+    "chrome browser": "chrome",
+    "browser": "chrome",
+    "google chrome": "chrome",
+    "explorer": "explorer",
+    "file explorer": "explorer",
+    "files": "explorer",
+    "my files": "explorer",
     "notepad": "notepad",
     "calculator": "calc",
     "calc": "calc",
+    "powerpoint": "powerpnt",
+    "power point": "powerpnt",
+    "microsoft powerpoint": "powerpnt",
+    "microsoft power point": "powerpnt",
+    "presentation": "powerpnt",
+    "word": "winword",
+    "microsoft word": "winword",
+    "excel": "excel",
+    "xl": "excel",
+    "excel sheet": "excel",
+    "spreadsheet": "excel",
+    "microsoft excel": "excel",
     "whatsapp": "whatsapp:",
     "spotify": "spotify",
+}
+
+APP_SPOKEN_NAMES = {
+    "youtube": "YouTube",
+    "you tube": "YouTube",
+    "google": "Google",
+    "maps": "Google Maps",
+    "google maps": "Google Maps",
+    "gmail": "Gmail",
+    "chrome": "Chrome",
+    "chrome browser": "Chrome",
+    "browser": "Chrome",
+    "google chrome": "Chrome",
+    "explorer": "File Explorer",
+    "file explorer": "File Explorer",
+    "files": "File Explorer",
+    "my files": "File Explorer",
+    "powerpoint": "PowerPoint",
+    "power point": "PowerPoint",
+    "microsoft powerpoint": "PowerPoint",
+    "microsoft power point": "PowerPoint",
+    "presentation": "PowerPoint",
+    "word": "Word",
+    "microsoft word": "Word",
+    "excel": "Excel",
+    "xl": "Excel",
+    "excel sheet": "Excel",
+    "spreadsheet": "Excel",
+    "microsoft excel": "Excel",
 }
 
 PHONE_APP_ALIASES = {
@@ -59,6 +109,11 @@ PHONE_APP_ALIASES = {
     "spotify": "com.spotify.music",
     "maps": "com.google.android.apps.maps",
     "google maps": "com.google.android.apps.maps",
+}
+
+PHONE_CONTACT_ALIASES = {
+    # Keep empty by default. Add safe local nicknames here later if needed:
+    # "home": "+15551234567",
 }
 
 CLOSE_APP_ALIASES = {
@@ -72,6 +127,36 @@ CLOSE_APP_ALIASES = {
     "calculator": "calculator",
     "calc": "calculator",
     "spotify": "spotify",
+}
+
+SAFE_KEY_WORDS = {
+    "windows": "win",
+    "window": "win",
+    "win": "win",
+    "start": "win",
+    "start menu": "win",
+    "enter": "enter",
+    "return": "enter",
+    "escape": "esc",
+    "esc": "esc",
+    "tab": "tab",
+    "space": "space",
+    "spacebar": "space",
+    "space bar": "space",
+    "backspace": "backspace",
+    "delete": "delete",
+    "home": "home",
+    "end": "end",
+    "page up": "pageup",
+    "page down": "pagedown",
+    "up": "up",
+    "down": "down",
+    "left": "left",
+    "right": "right",
+    "up arrow": "up",
+    "down arrow": "down",
+    "left arrow": "left",
+    "right arrow": "right",
 }
 
 # --- shared context with the voice loop ---
@@ -168,6 +253,18 @@ def _cleanup_youtube_query(text: str) -> str:
     return query
 
 
+def _is_generic_youtube_music(text: str, query: str) -> bool:
+    """True for vague commands that should not auto-open YouTube."""
+    low = normalize_text(text)
+    return query in {"music", "songs"} and not any(
+        word in low
+        for word in (
+            "telugu", "tamil", "hindi", "ilayaraja", "ilaiyaraaja",
+            "ilayaraj", "raja", "playlist", "movie", "song "
+        )
+    )
+
+
 def _is_youtube_play(text: str) -> bool:
     low = normalize_text(text)
     if not re.search(r"\b(play|olay|playe|start)\b", low):
@@ -200,20 +297,54 @@ def _morning_brief() -> str:
 
 def _open_target(text: str) -> IntentResult | None:
     low = normalize_text(text)
-    match = re.match(r"^(open|launch|start)\s+(.+)$", low)
+    drive = re.match(
+        r"^(?:open|go|get|navigate)\s+(?:to\s+)?([a-z])\s+(?:drive|drives?)$",
+        low,
+    )
+    if drive:
+        letter = drive.group(1).upper()
+        path = f"{letter}:\\"
+        skills.run_tool("open_app", {"name": path})
+        return IntentResult(True, f"Opening {letter} drive.", action="open_drive")
+
+    match = re.match(
+        r"^(?:(?:can|could|will|would)\s+you\s+)?(?:please\s+)?(?:new\s+)?"
+        r"(open|opened|launch|start)\s+(.+)$",
+        low,
+    )
     if not match:
         return None
     target = match.group(2).strip()
-    target = re.sub(r"\b(app|application|website|site)\b", "", target).strip()
+    if target not in APP_ALIASES:
+        target = re.sub(r"\b(app|application|website|site|window|please)\b", "", target).strip()
+    target = re.sub(r"^(?:the|a|an)\s+", "", target).strip()
     if not target:
         return None
 
-    mapped = APP_ALIASES.get(target, target)
+    if target not in APP_ALIASES:
+        return IntentResult(
+            True,
+            f"I don't know the app {target} yet, Sir.",
+            keep_active=True,
+            action="unknown_open_target",
+        )
+
+    mapped = APP_ALIASES[target]
     if mapped.startswith(("http://", "https://")):
-        result = skills.run_tool("open_url", {"url": mapped})
+        skills.run_tool("open_url", {"url": mapped})
+        spoken = APP_SPOKEN_NAMES.get(target)
+        result = f"Opening {spoken}." if spoken else f"Opening {target}."
     else:
         result = skills.run_tool("open_app", {"name": mapped})
+        spoken = APP_SPOKEN_NAMES.get(target) or APP_SPOKEN_NAMES.get(mapped)
+        if spoken:
+            result = f"Opening {spoken}."
     return IntentResult(True, result, action="open")
+
+
+def _is_close_youtube_tab(text: str) -> bool:
+    low = normalize_text(text)
+    return bool(re.match(r"^(?:close|quit|exit)\s+(?:the\s+)?(?:youtube|you tube)\s+tabs?$", low))
 
 
 def _close_target(text: str) -> IntentResult | None:
@@ -222,15 +353,17 @@ def _close_target(text: str) -> IntentResult | None:
         result = skills.run_tool("close_current_window", {})
         return IntentResult(True, result, action="close_window")
 
-    if low in {"close tab", "close this tab", "close current tab", "close youtube tab", "close youtube tabs", "close browser tab"}:
+    if low in {"close tab", "close this tab", "close current tab", "close youtube tab", "close youtube tabs", "close browser tab"} or _is_close_youtube_tab(low):
         result = skills.run_tool("close_current_tab", {"count": 1})
-        return IntentResult(True, result, action="close_tab")
+        reply = "Closed the current YouTube tab." if "youtube" in low or "you tube" in low else result
+        return IntentResult(True, reply, action="close_tab")
 
     match = re.match(r"^(close|quit|exit)\s+(.+)$", low)
     if not match:
         return None
     target = match.group(2).strip()
     target = re.sub(r"\b(app|application|window|website|site)\b", "", target).strip()
+    target = re.sub(r"^(?:the|a|an)\s+", "", target).strip()
     if target in {"tab", "tabs", "current tab", "this tab"}:
         result = skills.run_tool("close_current_tab", {"count": 1})
         return IntentResult(True, result, action="close_tab")
@@ -243,6 +376,18 @@ def _close_target(text: str) -> IntentResult | None:
         return IntentResult(True, result, action="close_app")
     result = skills.run_tool("close_current_window", {})
     return IntentResult(True, result, action="close_window")
+
+
+def _keyboard_key_from_text(text: str) -> str | None:
+    low = normalize_text(text)
+    if low in {"open start menu", "show start menu", "start menu"}:
+        return "win"
+    m = re.match(r"^(?:press|tap|hit)\s+(?:the\s+)?(.+)$", low)
+    if not m:
+        return None
+    target = m.group(1).strip()
+    target = re.sub(r"\s+(?:button|key)$", "", target).strip()
+    return SAFE_KEY_WORDS.get(target)
 
 
 def _parse_timer(text: str) -> tuple[int, str] | None:
@@ -269,7 +414,7 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     # Ignore conversational fillers. They otherwise reach the cloud brain while
     # the follow-up window is open and waste a request without a real command.
     if low in {"uh huh", "uh-huh", "huh", "hmm", "um", "okay then"}:
-        return IntentResult(True, "", keep_active=True, action="filler")
+        return IntentResult(True, "", keep_active=False, action="filler")
 
     # ── Pending confirmation check ────────────────────────────────────
     if _PENDING_CONFIRM["action"]:
@@ -310,6 +455,94 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     if low in {"health", "leha health", "assistant health", "system health", "check health"}:
         from .health import voice_summary
         return IntentResult(True, voice_summary(), action="health")
+
+    if low in {"pro status", "ultra status", "beast status", "ultra beast status",
+               "what is pending", "what is still missing", "what needs improvement"}:
+        from .pro_ops import spoken_status
+        return IntentResult(True, spoken_status(), keep_active=True, action="pro_status")
+
+    if low in {"barge in status", "barge-in status", "can you interrupt", "can i interrupt you"}:
+        from .pro_ops import barge_in_status
+        status = barge_in_status()
+        return IntentResult(True, status["recommendation"], keep_active=True, action="barge_in_status")
+
+    if low in {"wake validation", "wake test", "wake word test", "test wake word"}:
+        from .pro_ops import wake_validation_status
+        status = wake_validation_status()
+        reply = (
+            f"Wake engine {status['engine']} at threshold {status['threshold']}. "
+            "Test by saying Leha 20 times, then play music and check false wakes."
+        )
+        return IntentResult(True, reply, keep_active=True, action="wake_validation")
+
+    if low in {"open dashboard", "open pro dashboard", "open safety dashboard"}:
+        result = skills.run_tool("open_url", {"url": "http://127.0.0.1:8001/dashboard"})
+        return IntentResult(True, result, action="open_dashboard")
+
+    if low in {"home assistant status", "smart home status", "home status"}:
+        result = skills.run_tool("home_assistant_ping", {})
+        return IntentResult(True, result, keep_active=True, action="home_assistant_ping")
+
+    ha_list = re.match(r"^(?:list|show)\s+(?:home\s+assistant\s+)?(lights|switches|scenes|entities|sensors)$", low)
+    if ha_list:
+        domain_map = {
+            "lights": "light",
+            "switches": "switch",
+            "scenes": "scene",
+            "sensors": "sensor",
+            "entities": "",
+        }
+        result = skills.run_tool("home_assistant_list", {"domain": domain_map[ha_list.group(1)]})
+        return IntentResult(True, result, keep_active=True, action="home_assistant_list")
+
+    ha_turn = re.match(r"^(?:turn|switch)\s+(on|off)\s+([a-z0-9_. -]+)$", low)
+    if ha_turn:
+        entity_text = ha_turn.group(2).strip()
+        parts = entity_text.split()
+        entity_id = ""
+        if "." in entity_text:
+            entity_id = entity_text.replace(" ", "_")
+        elif len(parts) >= 2 and parts[0] in {"light", "switch", "scene", "fan", "cover", "climate", "media_player"}:
+            entity_id = parts[0] + "." + "_".join(parts[1:])
+        if not entity_id:
+            return IntentResult(False)
+        tool = "home_assistant_turn_on" if ha_turn.group(1) == "on" else "home_assistant_turn_off"
+        result = skills.run_tool(tool, {"entity_id": entity_id})
+        return IntentResult(True, result, action=tool)
+
+    ha_scene = re.match(r"^(?:activate|run|start)\s+(?:scene\s+)?([a-z0-9_. -]+)\s+scene$", low)
+    if ha_scene:
+        scene_id = ha_scene.group(1).strip().replace(" ", "_")
+        result = skills.run_tool("home_assistant_scene", {"scene_id": scene_id})
+        return IntentResult(True, result, action="home_assistant_scene")
+
+    if low in {"recent conversation", "conversation history", "what did we talk about",
+               "what were we talking about", "summarize our conversation"}:
+        try:
+            from .conversation_store import summary as conversation_summary
+            return IntentResult(True, conversation_summary(), keep_active=True, action="conversation_summary")
+        except Exception:
+            return IntentResult(True, "Conversation history is not available.", action="conversation_summary_error")
+
+    if low in {"notifications", "pending notifications", "what are my notifications",
+               "check notifications", "any notifications"}:
+        try:
+            from .notifier import pending_summary
+            return IntentResult(True, pending_summary(), keep_active=True, action="notifications")
+        except Exception:
+            return IntentResult(True, "Notifications are not available.", action="notifications_error")
+
+    m_memory_search = re.match(
+        r"^(?:search|check|look up|find|recall)\s+(?:my\s+)?(?:memory|memories)\s+(?:for|about)?\s*(.+)$",
+        low,
+    )
+    if m_memory_search:
+        query = m_memory_search.group(1).strip()
+        try:
+            from .structured_memory import semantic_recall
+            return IntentResult(True, semantic_recall(query), keep_active=True, action="semantic_memory_recall")
+        except Exception:
+            return IntentResult(True, "Semantic memory is not available.", action="semantic_memory_error")
 
     capability_words = {"access", "accessible", "capability", "capabilities"}
     capability_phrases = (
@@ -364,6 +597,12 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         print(f"[direct] set_volume({volume_match.group(1)!r}) -> {result}", flush=True)
         return IntentResult(True, result, action="volume")
 
+    if (_is_close_youtube_tab(low) or low in {"close current tab", "close the current tab"}) and (media_recent() or wake_free):
+        result = skills.run_tool("close_current_tab", {"count": 1})
+        clear_media_active()
+        print(f"[direct] close_current_tab(youtube) -> {result}", flush=True)
+        return IntentResult(True, "Closed the current YouTube tab.", keep_active=False, action="close_tab")
+
     # Wake-free mode is intentionally narrow: only safe media controls above.
     if wake_free:
         return IntentResult(False)
@@ -374,6 +613,25 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     if low in {"battery", "battery status", "system status", "laptop status", "cpu status"}:
         result = skills.run_tool("system_info", {})
         return IntentResult(True, result, action="system_info")
+
+    key_name = _keyboard_key_from_text(low)
+    if key_name:
+        result = skills.run_tool("press_key", {"key": key_name})
+        return IntentResult(True, result, keep_active=True, action="press_key")
+
+    if low in {
+        "where am i", "where am i now", "currently where am i",
+        "currently where i am", "tell me where am i",
+        "what is my location", "where is my current location",
+        "show my location", "open my location",
+    } or re.search(r"\b(?:where|ver)\s+(?:am\s+i|i\s+am|i\s+am\s+i)\b", low):
+        skills.run_tool("open_url", {"url": "https://www.google.com/maps"})
+        return IntentResult(
+            True,
+            "Opening Google Maps. Use the location button there to show exactly where you are.",
+            keep_active=True,
+            action="current_location",
+        )
 
     if low in {"weather", "weather today", "farm weather", "rain today", "rain forecast"}:
         result = skills.run_tool("get_weather", {})
@@ -402,10 +660,29 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
 
     if _is_youtube_play(low):
         query = _cleanup_youtube_query(low)
+        if _is_generic_youtube_music(low, query):
+            return IntentResult(
+                True,
+                "",
+                keep_active=True,
+                action="youtube_needs_query",
+            )
+        if query == "music" and media_recent(300):
+            return IntentResult(
+                True,
+                "Music is already playing, Sir.",
+                keep_active=False,
+                action="youtube_already_playing",
+            )
         result = skills.run_tool("play_youtube", {"query": query})
         set_media_active("youtube_play")
         print(f"[direct] play_youtube({query!r}) -> {result}", flush=True)
         return IntentResult(True, result, action="youtube_play")
+
+    phone_maps_early = re.match(r"^(?:navigate|directions?|go)\s+(?:to\s+)?(.+?)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
+    if phone_maps_early:
+        result = skills.run_tool("phone_maps", {"destination": phone_maps_early.group(1).strip()})
+        return IntentResult(True, result, action="phone_maps")
 
     maps_match = re.match(r"^(?:navigate|directions?)\s+(?:to\s+)?(.+)$", low)
     if maps_match:
@@ -415,11 +692,71 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     phone_open = re.match(r"^(?:open|launch|start)\s+(.+?)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
     if phone_open:
         app_name = phone_open.group(1).strip()
+        if re.search(r"\b(?:com|org|net|in|io|dev|app)\b$", app_name):
+            url = re.sub(r"\s+", ".", app_name)
+            result = skills.run_tool("phone_open_url", {"url": url})
+            return IntentResult(True, result, action="phone_open_url")
         package = PHONE_APP_ALIASES.get(app_name)
         if package:
             result = skills.run_tool("phone_open_app", {"package": package})
             return IntentResult(True, result, action="phone_open_app")
         return IntentResult(True, f"I need the Android package name for {app_name}.", action="phone_unknown_app")
+
+    phone_close = re.match(r"^(?:close|stop|force stop)\s+(.+?)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
+    if phone_close:
+        app_name = phone_close.group(1).strip()
+        package = PHONE_APP_ALIASES.get(app_name)
+        if package:
+            result = skills.run_tool("phone_force_stop_app", {"package": package})
+            return IntentResult(True, result, action="phone_force_stop_app")
+        return IntentResult(True, f"I need the Android package name for {app_name}.", action="phone_unknown_app")
+
+    phone_url = re.match(r"^(?:open|launch)\s+(.+?\..+?)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
+    if phone_url:
+        result = skills.run_tool("phone_open_url", {"url": phone_url.group(1).strip()})
+        return IntentResult(True, result, action="phone_open_url")
+
+    phone_yt = re.match(r"^(?:search|play|open)\s+(.+?)\s+(?:on|in)\s+(?:youtube|you tube)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
+    if phone_yt:
+        result = skills.run_tool("phone_youtube_search", {"query": phone_yt.group(1).strip()})
+        return IntentResult(True, result, action="phone_youtube_search")
+
+    phone_maps = re.match(r"^(?:navigate|directions?|go)\s+(?:to\s+)?(.+?)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
+    if phone_maps:
+        result = skills.run_tool("phone_maps", {"destination": phone_maps.group(1).strip()})
+        return IntentResult(True, result, action="phone_maps")
+
+    phone_sms = re.match(r"^(?:send|draft)\s+(?:sms|text|message)\s+to\s+(.+?)\s+(?:saying|that says|message)\s+(.+)$", low)
+    if phone_sms:
+        target = phone_sms.group(1).strip()
+        number = PHONE_CONTACT_ALIASES.get(target, target)
+        message = phone_sms.group(2).strip()
+        return _require_confirm(
+            "phone_send_sms",
+            lambda n=number, m=message: skills.run_tool("phone_send_sms", {"number": n, "message": m}),
+            f"Draft SMS to {target}: {message}. Say yes to continue.",
+        )
+
+    phone_wa = re.match(r"^(?:send|draft)\s+(?:whatsapp|whats app)\s+(?:message\s+)?to\s+(.+?)\s+(?:saying|that says|message)\s+(.+)$", low)
+    if phone_wa:
+        target = phone_wa.group(1).strip()
+        number = PHONE_CONTACT_ALIASES.get(target, target)
+        message = phone_wa.group(2).strip()
+        return _require_confirm(
+            "phone_whatsapp",
+            lambda n=number, m=message: skills.run_tool("phone_whatsapp", {"number": n, "message": m}),
+            f"Open WhatsApp to {target} with: {message}. Say yes to continue.",
+        )
+
+    phone_call = re.match(r"^(?:call|phone)\s+(.+?)\s+(?:from|on|with)\s+(?:my\s+)?phone$", low)
+    if phone_call:
+        target = phone_call.group(1).strip()
+        number = PHONE_CONTACT_ALIASES.get(target, target)
+        return _require_confirm(
+            "phone_call",
+            lambda n=number: skills.run_tool("phone_call", {"number": n}),
+            f"Call {target} from the phone? Say yes to continue.",
+        )
 
     opened = _open_target(low)
     if opened:
@@ -596,9 +933,28 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         result = skills.run_tool("phone_screenshot", {})
         return IntentResult(True, result, action="phone_screenshot")
 
+    if low in {"read phone screen", "read my phone screen", "what is on my phone",
+               "what is on the phone", "describe phone screen"}:
+        result = skills.run_tool("phone_screen_dump", {})
+        return IntentResult(True, result, action="phone_screen_dump")
+
+    tap_text = re.match(r"^(?:tap|press|click)\s+(.+?)\s+(?:on|in)\s+(?:my\s+)?phone$", low)
+    if tap_text:
+        result = skills.run_tool("phone_tap_text", {"text": tap_text.group(1).strip()})
+        return IntentResult(True, result, action="phone_tap_text")
+
     if low in {"find my phone", "ring my phone", "where is my phone"}:
         result = skills.run_tool("phone_ring", {})
         return IntentResult(True, result, action="phone_ring")
+
+    if low in {"setup wireless adb", "setup phone wifi", "make phone wireless",
+               "enable wireless phone control", "untether phone"}:
+        result = skills.run_tool("phone_wifi_setup", {})
+        return IntentResult(True, result, action="phone_wifi_setup")
+
+    if low in {"reconnect phone", "reconnect wireless phone", "reconnect adb phone"}:
+        result = skills.run_tool("phone_wifi_reconnect", {})
+        return IntentResult(True, result, action="phone_wifi_reconnect")
 
     if low in {"phone home", "go home on phone"}:
         result = skills.run_tool("phone_key", {"key": "home"})
@@ -707,6 +1063,18 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
             result = "Data export is not available."
         return IntentResult(True, result, action="memory_export")
 
+    if low in {"forget our conversation", "forget the conversation",
+               "clear conversation", "clear our conversation",
+               "clear history", "clear our history", "reset conversation",
+               "forget our chat"}:
+        try:
+            from . import conversation_store
+            conversation_store.clear()
+            result = "Conversation cleared, Sir."
+        except Exception:
+            result = "Could not clear conversation history, Sir."
+        return IntentResult(True, result, keep_active=False, action="clear_conversation")
+
     m_forget = re.match(r"^forget\s+(?:that\s+)?(.+)$", low)
     if m_forget and low not in {"forget it"}:
         query = m_forget.group(1).strip()
@@ -716,5 +1084,18 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         except Exception:
             result = "Memory forget is not available."
         return IntentResult(True, result, action="memory_forget")
+
+    # ── Phase B: Conversation history management ─────────────────────────
+    if low in {"forget our conversation", "forget the conversation",
+               "clear conversation", "clear our conversation",
+               "clear history", "clear our history", "reset conversation",
+               "forget our chat"}:
+        try:
+            from . import conversation_store
+            conversation_store.clear()
+            result = "Conversation cleared, Sir."
+        except Exception:
+            result = "Could not clear conversation history, Sir."
+        return IntentResult(True, result, keep_active=False, action="clear_conversation")
 
     return IntentResult(False)

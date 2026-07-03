@@ -81,7 +81,12 @@ class TestStructuredMemory(unittest.TestCase):
 
     def test_skills_registered(self):
         names = {s[0]["name"] for s in self.sm.SKILLS}
-        self.assertEqual(names, {"remember_this", "what_do_you_remember", "forget_that"})
+        self.assertEqual(names, {
+            "remember_this",
+            "what_do_you_remember",
+            "semantic_memory_recall",
+            "forget_that",
+        })
 
 
 class TestSummarizer(unittest.TestCase):

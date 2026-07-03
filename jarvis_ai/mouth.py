@@ -8,6 +8,7 @@ import time
 import sys
 import numpy as np
 from . import config
+from . import language
 from .runtime_state import runtime
 
 
@@ -84,7 +85,7 @@ class Mouth:
             return generation is None or generation == self._generation
 
     def _speak_powershell(self, text: str):
-        safe_text = text.encode("ascii", "ignore").decode("ascii")
+        safe_text = text
         escaped = safe_text.replace("'", "''")
         voice = getattr(config, "POWERSHELL_TTS_VOICE", "").replace("'", "''")
         ps = (
@@ -138,6 +139,26 @@ class Mouth:
             except OSError:
                 pass
             return
+        try:
+            import sounddevice as sd
+            import soundfile as sf
+
+            audio, sample_rate = sf.read(media_path, dtype="float32", always_2d=True)
+            with self._lock:
+                if generation is not None and generation != self._generation:
+                    os.unlink(media_path)
+                    return
+                self._stop_event.clear()
+            sd.play(audio, sample_rate, device=config.OUTPUT_DEVICE)
+            sd.wait()
+            try:
+                os.unlink(media_path)
+            except OSError:
+                pass
+            return
+        except Exception as e:
+            print(f"[mouth] direct Edge playback failed ({e}); falling back to Windows MediaPlayer")
+
         escaped = media_path.replace("'", "''")
         ps = (
             "Add-Type -AssemblyName PresentationCore; "
@@ -163,7 +184,7 @@ class Mouth:
                 return
             self._stop_event.clear()
             proc = subprocess.Popen(
-                ["powershell", "-Command", ps],
+                ["powershell", "-NoProfile", "-STA", "-Command", ps],
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             self._proc = proc
@@ -177,7 +198,7 @@ class Mouth:
                     self._proc = None
 
     def _speak_clone(self, text: str):
-        safe_text = text.encode("ascii", "ignore").decode("ascii")
+        safe_text = text
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
             media_path = f.name
         cmd = [
@@ -229,7 +250,7 @@ class Mouth:
                     self._proc = None
 
     def _speak_hf(self, text: str):
-        safe_text = text.encode("ascii", "ignore").decode("ascii")
+        safe_text = text
         endpoint = config.HF_TTS_ENDPOINT_URL
         if not endpoint and config.HF_TTS_MODEL:
             endpoint = "https://api-inference.huggingface.co/models/" + config.HF_TTS_MODEL
@@ -279,15 +300,16 @@ class Mouth:
                 self._speak_edge(safe_text)
 
     def _speak_edge(self, text: str, generation: int | None = None):
-        safe_text = text.encode("ascii", "ignore").decode("ascii")
+        safe_text = text
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
             media_path = f.name
 
         async def _save():
             import edge_tts
+            voice = language.edge_voice_for_text(safe_text)
             communicate = edge_tts.Communicate(
                 safe_text,
-                config.EDGE_TTS_VOICE,
+                voice or config.EDGE_TTS_VOICE,
                 rate=config.EDGE_TTS_RATE,
                 pitch=config.EDGE_TTS_PITCH,
             )
@@ -421,7 +443,7 @@ class Mouth:
     def say(self, text: str, wait: bool = False):
         if not text:
             return
-        safe_text = text.encode("ascii", "ignore").decode("ascii")
+        safe_text = text
         print(f"{config.ASSISTANT_NAME}: {safe_text}")
         # interrupt any previous speech
         self.stop()

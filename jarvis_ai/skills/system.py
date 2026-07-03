@@ -39,6 +39,61 @@ def close_current_window() -> str:
     return "Closed the current window."
 
 
+SAFE_KEYS = {
+    "win": "Windows",
+    "enter": "Enter",
+    "esc": "Escape",
+    "tab": "Tab",
+    "space": "Space",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "home": "Home",
+    "end": "End",
+    "pageup": "Page up",
+    "pagedown": "Page down",
+    "up": "Up arrow",
+    "down": "Down arrow",
+    "left": "Left arrow",
+    "right": "Right arrow",
+}
+
+KEY_ALIASES = {
+    "windows": "win",
+    "window": "win",
+    "windows key": "win",
+    "windows button": "win",
+    "win key": "win",
+    "win button": "win",
+    "start": "win",
+    "start key": "win",
+    "start button": "win",
+    "start menu": "win",
+    "escape": "esc",
+    "escape key": "esc",
+    "enter key": "enter",
+    "return": "enter",
+    "return key": "enter",
+    "spacebar": "space",
+    "space bar": "space",
+    "page up": "pageup",
+    "page down": "pagedown",
+    "up arrow": "up",
+    "down arrow": "down",
+    "left arrow": "left",
+    "right arrow": "right",
+}
+
+
+def press_key(key: str) -> str:
+    import pyautogui
+    raw = (key or "").strip().lower()
+    mapped = KEY_ALIASES.get(raw, raw)
+    if mapped not in SAFE_KEYS:
+        return f"I cannot press {key} without a safe local route."
+    pyautogui.press(mapped)
+    return f"Pressed {SAFE_KEYS[mapped]} key."
+
+
 def close_app(name: str) -> str:
     """Close an app by common name. Browser names close the whole browser."""
     aliases = {
@@ -123,6 +178,11 @@ SKILLS = [
     ({"name": "close_current_window",
       "description": "Close the active app/window using Alt+F4.",
       "parameters": {"type": "object", "properties": {}}}, close_current_window),
+    ({"name": "press_key",
+      "description": "Press a safe keyboard key such as Windows, Enter, Escape, Tab, Space, arrows, Delete, Home, or End.",
+      "parameters": {"type": "object",
+                     "properties": {"key": {"type": "string"}},
+                     "required": ["key"]}}, press_key),
     ({"name": "close_app",
       "description": "Close an app by name, such as chrome, edge, notepad, calculator, spotify.",
       "parameters": {"type": "object",

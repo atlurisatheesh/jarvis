@@ -17,6 +17,8 @@ import json
 import time
 from pathlib import Path
 
+import numpy as np
+
 
 def _load_wav_16k(path: str | Path) -> tuple[np.ndarray, int]:
     """Load WAV, return (float32 samples, original sample rate)."""
@@ -59,7 +61,11 @@ def _evaluate_model(
         max_score = 0.0
         for start in range(0, len(data) - window_len + 1, hop_len):
             window = data[start : start + window_len].astype(np.float32)
-            window = window.reshape(1, -1)
+            input_shape = session.get_inputs()[0].shape
+            if len(input_shape) == 3:
+                window = window.reshape(1, 1, -1)
+            else:
+                window = window.reshape(1, -1)
             logit = session.run(None, {input_name: window})[0][0]
             score = float(1.0 / (1.0 + np.exp(-logit)))  # sigmoid
             max_score = max(max_score, score)
@@ -117,8 +123,6 @@ def _evaluate_model(
 
 
 def main():
-    import numpy as np
-
     parser = argparse.ArgumentParser(description="Evaluate Leha wake-word model")
     parser.add_argument("--model", required=True, help="Path to ONNX model")
     parser.add_argument("--positive", required=True, help="Directory of positive held-out clips")

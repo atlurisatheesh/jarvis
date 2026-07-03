@@ -12,7 +12,9 @@ aggressive fuzzy aliases (like "lena", "layla", soundex L200) that are prone
 to false wakes. The high-precision triggers and the strongest phonetic match
 remain so the transcript fallback still catches clear "Leha" speech.
 """
+import os
 import string
+import re
 from difflib import SequenceMatcher
 
 # ── Whisper hallucination patterns ──────────────────────────────────
@@ -29,15 +31,39 @@ NOISE_PHRASES = {
     "good night",
     "hello", "hi",
     "take care",
+    "go ahead", "go ahead mike", "go ahead mic", "go head mike",
 }
+
+INDIC_WAKE_TRIGGERS = (
+    "लेहा", "लेखा", "लीहा",
+    "లేహా", "లేఖ", "లీహా",
+    "லேஹா", "லேகா", "லீஹா",
+    "ಲೇಹಾ", "ಲೇಖಾ", "ಲೀಹಾ",
+    "ലേഹ", "ലേഖ", "ലീഹ",
+    "লেহা", "লেখা", "লীহা",
+    "લેહા", "લેખા", "લીહા",
+)
+
+# Exact strict-mode variants observed from this laptop microphone. Keep this
+# intentionally tiny; broad aliases such as layer/later still cause false wakes.
+OBSERVED_STRICT_WAKE_TRIGGERS = (
+    "lehon",
+    "lehav",
+)
 
 # ── Exact / known Whisper manglings of "Leha" ──────────────────────
 TRIGGERS = (
     # exact / greetings
     "hey leha", "hi leha", "ok leha", "okay leha", "hello leha",
+    # openWakeWord "hey jarvis" trigger (used when OWW is the primary engine)
+    "hey jarvis", "hi jarvis", "ok jarvis", "okay jarvis", "hello jarvis",
+    "jarvis",
     # core variants
-    "leha", "leah", "liha", "leeha", "layha", "laiha",
+    "leha", "leah", "liha", "leeha", "layha", "laiha", "lehav", "lehra",
+    "leja", "lekha", "lleha",
     "le ha", "lee ha", "lia", "liya", "laya", "leyah", "leya",
+    # Real room/STT misses seen in live logs
+    "layer", "lair", "lear", "lehr", "lehrer", "later",
     # Whisper manglings observed in real sessions
     "jai maaise", "ja reis", "ja razi", "jaros",
     "jai royce", "ciao royce",
@@ -48,17 +74,20 @@ TRIGGERS = (
     "lehah", "lehha", "lehe", "laha", "lahe",
     "leyha", "leaha", "leeah", "leea",
     "le hah", "lay ha", "lee hah",
-    "lehaa", "leia", "liah", "lihaa", "leaha", "lehha",
+    "lehaa", "leia", "liah", "lihaa", "leaha", "lehha", "levah", "lerha",
+    "leja", "lekha", "lleha",
     "lena", "lela", "leela", "lelaa", "layla", "lela",
     "hey leah", "hey leia", "ok leah", "okay leah",
-)
+) + INDIC_WAKE_TRIGGERS
 
 # Short fragments for substring matching
 _TRIGGER_FRAGMENTS = (
     "leha", "leah", "leeha", "liha", "leya", "liya", "lehah", "leyha",
-    "lehaa", "leia", "lihaa",
+    "lehaa", "leia", "lihaa", "lehav", "levah", "lehra", "lerha",
+    "leja", "lekha", "lleha",
+    "layer", "lair", "lear", "lehr", "lehrer", "later",
     "lena", "lela", "leela", "layla",
-)
+) + INDIC_WAKE_TRIGGERS
 
 # High-precision triggers used in strict mode (dedicated ONNX model is primary).
 # Only the clearest, lowest-false-positive variants are kept. Broad near-misses
@@ -67,29 +96,43 @@ _TRIGGER_FRAGMENTS = (
 _STRICT_TRIGGERS = (
     "hey leha", "hi leha", "ok leha", "okay leha", "hello leha",
     "leha", "leah", "liha", "leeha",
-    "lehah", "lehha", "lehaa",
+    "lehah", "lehha", "lehaa", "lehe", "leia", "leja", "lekha", "lleha",
     "hey leah", "ok leah", "okay leah",
+    "hey jarvis", "hi jarvis", "jarvis",
+    *OBSERVED_STRICT_WAKE_TRIGGERS,
+    *INDIC_WAKE_TRIGGERS,
 )
 
-_STRICT_FRAGMENTS = ("leha", "leah", "leeha", "liha", "lehah", "lehaa")
+_STRICT_FRAGMENTS = (
+    "leha", "leah", "leeha", "liha", "lehah", "lehaa", "leia", "leja", "lekha", "lleha",
+    *OBSERVED_STRICT_WAKE_TRIGGERS,
+    *INDIC_WAKE_TRIGGERS,
+)
 
 
 def strict_mode() -> bool:
-    """True when the dedicated ONNX wake detector is the primary engine.
-
-    When True, the transcript fallback tightens its aliases to reduce false
-    wakes, because real wake detection is handled by the trained model.
-    """
+    """Return strict/high-precision transcript wake aliases."""
     try:
         from . import config
-        return bool(getattr(config, "CUSTOM_WAKE_ENABLED", False))
+        raw = getattr(config, "TRANSCRIPT_WAKE_STRICT", True)
+        if raw is True or raw is False:
+            return raw
+        if isinstance(raw, str) and raw.lower() in ("0", "false", "no", "off"):
+            return False
+        if isinstance(raw, str) and raw.lower() in ("1", "true", "yes", "on"):
+            return True
+        # auto — only strict when the dedicated model is actually running
+        return True
     except Exception:
-        return False
+        return True
 
 
 # Precise variants only — no broad near-misses like "layla"/"lena"/"leela".
 _PRECISE_VARIANTS = {
     "leha", "leah", "liha", "leeha", "lehah", "lehha", "lehaa", "lehe",
+    "leia", "leja", "lekha", "lleha",
+    *OBSERVED_STRICT_WAKE_TRIGGERS,
+    *INDIC_WAKE_TRIGGERS,
 }
 
 
@@ -108,6 +151,24 @@ def _looks_like_leha_strict(word: str) -> bool:
     return max(
         SequenceMatcher(None, word, t).ratio() for t in ("leha", "leah", "leeha")
     ) >= 0.93
+
+
+def _contains_trigger_phrase(low: str, triggers) -> bool:
+    """Match wake phrases on word boundaries, not inside unrelated words."""
+    for trigger in triggers:
+        pattern = r"(?<![a-z0-9])" + re.escape(trigger) + r"(?![a-z0-9])"
+        if re.search(pattern, low):
+            return True
+    return False
+
+
+def _strip_leading_trigger_phrase(low: str, triggers) -> str | None:
+    """Remove a leading wake phrase only when it ends on a word boundary."""
+    for trigger in sorted(triggers, key=len, reverse=True):
+        pattern = r"^" + re.escape(trigger) + r"(?![a-z0-9])\s*"
+        if re.match(pattern, low):
+            return re.sub(pattern, "", low, count=1).strip(" ,.")
+    return None
 
 # ── Phonetic similarity for unknown manglings ──────────────────────
 
@@ -143,8 +204,10 @@ def _looks_like_leha(word: str) -> bool:
     # Direct prefix check — catches leha, leah, lehah, leeha, etc.
     if word in {
         "leha", "leah", "liha", "leeha", "layha", "laiha", "liya",
-        "laya", "leyah", "leya", "lehah", "lehha", "lehe", "laha",
+        "laya", "leyah", "leya", "lehah", "lehha", "lehe", "lehav", "levah", "lehra", "lerha", "laha",
         "lahe", "leyha", "leaha", "leeah", "leea", "lehaa", "leia",
+        "leja", "lekha", "lleha",
+        "layer", "lair", "lear", "lehr", "lehrer", "later",
         "liah", "lihaa", "lena", "lela", "leela", "layla",
     }:
         return True
@@ -161,7 +224,7 @@ def _looks_like_leha(word: str) -> bool:
 def wake_confidence(text: str) -> float:
     """Return a rough 0..1 wake confidence for diagnostics."""
     low = normalize_text(text)
-    if any(t in low for t in TRIGGERS):
+    if _contains_trigger_phrase(low, TRIGGERS):
         return 1.0
     scores = []
     words = low.split()
@@ -221,13 +284,13 @@ def has_trigger(text: str) -> bool:
     """
     low = normalize_text(text)
     if strict_mode():
-        if any(t in low for t in _STRICT_TRIGGERS):
+        if _contains_trigger_phrase(low, _STRICT_TRIGGERS):
             return True
         # High-precision phonetic fallback only — no broad aliases.
         words = low.split()
         return any(_looks_like_leha_strict(w) for w in words[:2])
     # Check exact triggers first (fast path)
-    if any(t in low for t in TRIGGERS):
+    if _contains_trigger_phrase(low, TRIGGERS):
         return True
     # Check each word phonetically (catches new/unseen manglings)
     return wake_confidence(low) >= 0.82
@@ -236,10 +299,12 @@ def has_trigger(text: str) -> bool:
 def strip_trigger(text: str) -> str:
     """Remove a leading wake phrase from text, return the command portion."""
     low = normalize_text(text)
-    # Try longest triggers first to avoid partial matches
-    for trigger in sorted(TRIGGERS, key=len, reverse=True):
-        if low.startswith(trigger):
-            return low[len(trigger):].strip(" ,.")
+    # Try longest triggers first to avoid partial matches, but only at word
+    # boundaries so "learn" is not stripped by the "lear" wake alias.
+    leading_triggers = _STRICT_TRIGGERS if strict_mode() else TRIGGERS
+    stripped = _strip_leading_trigger_phrase(low, leading_triggers)
+    if stripped is not None:
+        return stripped
     # Try phonetic match on first word
     words = low.split()
     if words and _looks_like_leha(words[0]):

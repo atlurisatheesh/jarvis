@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import threading
 import time
+import subprocess
+import webbrowser
 from pathlib import Path
 
 
@@ -27,11 +29,11 @@ def _try_import():
 
 def _create_icon(color: str = "#22D3EE") -> "Image.Image | None":
     """Create a simple L-shaped icon."""
-    Image = _try_import()[1]
+    _, Image, ImageDraw, _ = _try_import()
     if Image is None:
         return None
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = Image.ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([8, 8, 56, 56], radius=12, fill=color)
     draw.text((16, 20), "L", fill="white")
     return img
@@ -44,6 +46,18 @@ def _health_text() -> str:
         return voice_summary()
     except Exception:
         return "Leha"
+
+
+def _run_script_file(name: str) -> None:
+    root = Path(__file__).resolve().parent.parent
+    script = root / "scripts" / name
+    if not script.exists():
+        raise FileNotFoundError(f"Missing script: {name}")
+    subprocess.Popen(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        cwd=str(root),
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 def _state_icon(state: str) -> "Image.Image | None":
@@ -75,13 +89,56 @@ def main():
         from pystray import Menu, MenuItem
         icon.notify(text, "Leha Health")
 
+    def _run_script(name: str):
+        try:
+            _run_script_file(name)
+            icon.notify(f"Started {name}", "Leha")
+        except Exception as e:
+            icon.notify(str(e), "Leha")
+
+    def _open_dashboard(icon, item):
+        webbrowser.open("http://127.0.0.1:8001/dashboard")
+
+    def _start_listener(icon, item):
+        _run_script("start_leha.ps1")
+
+    def _restart_listener(icon, item):
+        _run_script("restart_leha.ps1")
+
+    def _stop_listener(icon, item):
+        _run_script("stop_leha.ps1")
+
+    def _status(icon, item):
+        _run_script("status_leha.ps1")
+
+    def _validate(icon, item):
+        _run_script("validate_startup.ps1")
+
+    def _install_startup(icon, item):
+        _run_script("install_autostart.ps1")
+
+    def _uninstall_startup(icon, item):
+        _run_script("uninstall_autostart.ps1")
+
+    def _cleanup_logs(icon, item):
+        _run_script("cleanup_logs.ps1")
+
     def _on_quit(icon, item):
         state["running"] = False
         icon.stop()
 
     menu = pystray.Menu(
         pystray.MenuItem("Health", _on_clicked, default=True),
-        pystray.MenuItem("Quit", _on_quit),
+        pystray.MenuItem("Open Dashboard", _open_dashboard),
+        pystray.MenuItem("Status", _status),
+        pystray.MenuItem("Validate Startup", _validate),
+        pystray.MenuItem("Start Listener", _start_listener),
+        pystray.MenuItem("Restart Listener", _restart_listener),
+        pystray.MenuItem("Stop Listener", _stop_listener),
+        pystray.MenuItem("Install Startup", _install_startup),
+        pystray.MenuItem("Uninstall Startup", _uninstall_startup),
+        pystray.MenuItem("Cleanup Logs", _cleanup_logs),
+        pystray.MenuItem("Quit Tray", _on_quit),
     )
 
     icon = pystray.Icon("leha", _create_icon(), "Leha", menu)

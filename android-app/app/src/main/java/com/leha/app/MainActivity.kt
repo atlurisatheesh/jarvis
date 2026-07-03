@@ -1,14 +1,16 @@
 package com.leha.app
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Bundle
+import android.os.Build
 import android.speech.tts.TextToSpeech
 import android.text.InputType
+import android.view.View
 import android.view.WindowManager
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
@@ -19,16 +21,16 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
 
 /**
- * Leha — hands-free native client (Siri-style "just talk").
- * Tap START once: Leha listens continuously, auto-detects when you finish
- * speaking (VAD), sends to the laptop, speaks the reply, then listens again.
- * Mutes itself while speaking so it doesn't hear its own voice.
+ * Leha — hands-free native client UI.
+ *
+ * The mic loop + brain call live in [LehaForegroundService]; this Activity is
+ * only the control surface (arm/stop), the live transcript view, and settings
+ * (laptop IP, PIN, Picovoice AccessKey, sensitivity). It no longer records
+ * audio itself.
  */
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -39,18 +41,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = null
 
     @Volatile private var listening = false
-    @Volatile private var speaking = false
-    @Volatile private var busy = false
+
+    private val serviceReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val newStatus = intent?.getStringExtra("status")
+            if (!newStatus.isNullOrBlank()) status.text = newStatus
+            val heard = intent?.getStringExtra("heard")
+            val reply = intent?.getStringExtra("reply")
+            if (!heard.isNullOrBlank() || !reply.isNullOrBlank()) {
+                transcript.text = "You: ${heard ?: ""}\n\nLeha: ${reply ?: ""}"
+            }
+        }
+    }
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
-
-    private val SR = 16000
-    private val START_RMS = 600.0     // speech onset threshold (PCM16)
-    private val SILENCE_MS = 800       // stop after this much quiet
-    private val MIN_SPEECH_MS = 300    // ignore blips
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,14 +73,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             text = "● LEHA"; setTextColor(0xFF22D3EE.toInt()); textSize = 18f; letterSpacing = 0.3f
         }
         status = TextView(this).apply {
-            text = "Tap START, then just talk"; setTextColor(0xFF64748B.toInt()); textSize = 13f
+            text = "Tap ARM, then just talk"; setTextColor(0xFF64748B.toInt()); textSize = 13f
             setPadding(0, 16, 0, 0)
         }
         transcript = TextView(this).apply {
             setTextColor(0xFFDBEAFE.toInt()); textSize = 16f; setPadding(0, 32, 0, 32)
         }
         orb = Button(this).apply {
-            text = "START"; setTextColor(0xFF001018.toInt()); textSize = 18f
+            text = "ARM LEHA"; setTextColor(0xFF001018.toInt()); textSize = 18f
             setBackgroundColor(0xFF22D3EE.toInt())
             setOnClickListener { if (listening) stopListening() else startListening() }
         }
@@ -88,11 +95,30 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         root.addView(orb, LinearLayout.LayoutParams(440, 200).apply {
             gravity = android.view.Gravity.CENTER_HORIZONTAL
         })
+        root.addView(Button(this).apply {
+            text = "Test Server"; setTextColor(0xFFDBEAFE.toInt()); setBackgroundColor(0xFF334155.toInt())
+            setOnClickListener { testServer() }
+        })
+        root.addView(Button(this).apply {
+            text = "Type Command"; setTextColor(0xFFDBEAFE.toInt()); setBackgroundColor(0xFF334155.toInt())
+            setOnClickListener { showTextCommand() }
+        })
         root.addView(settings)
         setContentView(root)
 
         ensureMic()
+        ensureNotifications()
+        registerServiceReceiver()
         if (prefs.getString("ip", "").isNullOrBlank()) showSettings()
+    }
+
+    private fun registerServiceReceiver() {
+        val filter = IntentFilter(LehaForegroundService.ACTION_EVENT)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(serviceReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(serviceReceiver, filter)
+        }
     }
 
     private fun ensureMic() {
@@ -102,117 +128,131 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun ensureNotifications() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
+        }
+    }
+
+    private fun commandService(action: String) {
+        val intent = Intent(this, LehaForegroundService::class.java).setAction(action)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+    }
+
     private fun showSettings() {
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 24, 48, 0) }
         val ipIn = EditText(this).apply { hint = "Laptop IP e.g. 192.168.31.48"; setText(prefs.getString("ip", "")) }
         val pinIn = EditText(this).apply {
             hint = "PIN"; setText(prefs.getString("pin", "")); inputType = InputType.TYPE_CLASS_NUMBER
         }
-        box.addView(ipIn); box.addView(pinIn)
+        val keyIn = EditText(this).apply {
+            hint = "Picovoice AccessKey (optional — for 'Leha' hotword)"
+            setText(prefs.getString("access_key", ""))
+        }
+        val sensIn = EditText(this).apply {
+            hint = "Sensitivity 0.0-1.0 (default 0.7)"
+            setText(prefs.getFloat("sensitivity", 0.7f).toString())
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        }
+        box.addView(ipIn); box.addView(pinIn); box.addView(keyIn); box.addView(sensIn)
         AlertDialog.Builder(this).setTitle("Connect to Leha").setView(box)
             .setPositiveButton("Save") { _, _ ->
-                prefs.edit().putString("ip", ipIn.text.toString().trim())
-                    .putString("pin", pinIn.text.toString().trim()).apply()
-                status.text = "Saved. Tap START."
+                val sens = sensIn.text.toString().trim().toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.7f
+                prefs.edit()
+                    .putString("ip", ipIn.text.toString().trim())
+                    .putString("pin", pinIn.text.toString().trim())
+                    .putString("access_key", keyIn.text.toString().trim())
+                    .putFloat("sensitivity", sens)
+                    .apply()
+                status.text = "Saved. Tap ARM."
+                testServer()
             }.setNegativeButton("Cancel", null).show()
     }
 
-    // ---- continuous hands-free loop ----
+    // ---- hands-free control ----
     private fun startListening() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) { ensureMic(); return }
         if (prefs.getString("ip", "").isNullOrBlank()) { showSettings(); return }
         listening = true
         orb.text = "STOP"; orb.setBackgroundColor(0xFF34D399.toInt())
-        status.text = "Listening… just talk"
-        thread(start = true) { captureLoop() }
+        status.text = "Arming…"
+        commandService(LehaForegroundService.ACTION_START_LISTEN)
     }
 
     private fun stopListening() {
         listening = false
-        orb.text = "START"; orb.setBackgroundColor(0xFF22D3EE.toInt())
+        orb.text = "ARM LEHA"; orb.setBackgroundColor(0xFF22D3EE.toInt())
         runOnUiThread { status.text = "Stopped" }
+        commandService(LehaForegroundService.ACTION_STOP_LISTEN)
     }
 
-    private fun captureLoop() {
-        val minBuf = AudioRecord.getMinBufferSize(SR, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val rec = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SR,
-            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, SR))
-        val frame = ShortArray(1600) // 100ms
-        val speech = ByteArrayOutputStream()
-        var inSpeech = false
-        var silentMs = 0
-        var speechMs = 0
-        try {
-            rec.startRecording()
-            while (listening) {
-                if (speaking || busy) { Thread.sleep(60); continue }
-                val n = rec.read(frame, 0, frame.size)
-                if (n <= 0) continue
-                var sum = 0.0
-                for (i in 0 until n) sum += (frame[i] * frame[i]).toDouble()
-                val rms = Math.sqrt(sum / n)
-                val ms = n * 1000 / SR
-                if (rms > START_RMS) {
-                    if (!inSpeech) { inSpeech = true; speech.reset(); speechMs = 0 }
-                    silentMs = 0; speechMs += ms
-                    val b = ByteArray(n * 2)
-                    for (i in 0 until n) { b[i*2] = (frame[i].toInt() and 0xFF).toByte(); b[i*2+1] = (frame[i].toInt() shr 8).toByte() }
-                    speech.write(b)
-                } else if (inSpeech) {
-                    silentMs += ms
-                    val b = ByteArray(n * 2)
-                    for (i in 0 until n) { b[i*2] = (frame[i].toInt() and 0xFF).toByte(); b[i*2+1] = (frame[i].toInt() shr 8).toByte() }
-                    speech.write(b)
-                    if (silentMs >= SILENCE_MS) {
-                        inSpeech = false
-                        if (speechMs >= MIN_SPEECH_MS) sendWav(speech.toByteArray())
-                        speech.reset()
-                    }
+    private fun testServer() {
+        val ip = prefs.getString("ip", "") ?: ""
+        if (ip.isBlank()) { showSettings(); return }
+        status.text = "Testing server..."
+        val req = Request.Builder().url("http://$ip:8001/api/health").get().build()
+        http.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {
+                runOnUiThread { status.text = "Server offline: ${e.message}" }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val body = response.body?.string() ?: ""
+                runOnUiThread {
+                    status.text = if (response.isSuccessful) "Server online" else "Server HTTP ${response.code}"
+                    transcript.text = body.take(600)
                 }
             }
-        } catch (e: Exception) {
-            runOnUiThread { status.text = "Mic error: ${e.message}" }
-        } finally {
-            try { rec.stop(); rec.release() } catch (_: Exception) {}
+        })
+    }
+
+    private fun showTextCommand() {
+        val input = EditText(this).apply {
+            hint = "Ask Leha"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
         }
+        AlertDialog.Builder(this)
+            .setTitle("Type command")
+            .setView(input)
+            .setPositiveButton("Send") { _, _ ->
+                val text = input.text.toString().trim()
+                if (text.isNotBlank()) sendText(text)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
-    private fun wavHeader(pcmLen: Int): ByteArray {
-        val total = 36 + pcmLen
-        val h = ByteArrayOutputStream()
-        fun s(x: String) = h.write(x.toByteArray())
-        fun i(x: Int) { h.write(x and 0xFF); h.write((x shr 8) and 0xFF); h.write((x shr 16) and 0xFF); h.write((x shr 24) and 0xFF) }
-        fun sh(x: Int) { h.write(x and 0xFF); h.write((x shr 8) and 0xFF) }
-        s("RIFF"); i(total); s("WAVE"); s("fmt "); i(16); sh(1); sh(1); i(SR); i(SR*2); sh(2); sh(16); s("data"); i(pcmLen)
-        return h.toByteArray()
-    }
-
-    private fun sendWav(pcm: ByteArray) {
-        busy = true
-        runOnUiThread { status.text = "Thinking…" }
-        val wav = wavHeader(pcm.size) + pcm
-        val ip = prefs.getString("ip", "") ?: ""; val pin = prefs.getString("pin", "") ?: ""
-        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("audio", "rec.wav", wav.toRequestBody("audio/wav".toMediaType()))
-            .build()
-        val req = Request.Builder().url("http://$ip:8001/api/voice")
+    private fun sendText(text: String) {
+        val ip = prefs.getString("ip", "") ?: ""
+        val pin = prefs.getString("pin", "") ?: ""
+        if (ip.isBlank()) { showSettings(); return }
+        status.text = "Thinking..."
+        commandService("Thinking")
+        val body = JSONObject().put("text", text).toString()
+            .toRequestBody("application/json".toMediaType())
+        val req = Request.Builder().url("http://$ip:8001/api/text")
             .addHeader("X-Leha-Pin", pin).post(body).build()
         http.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: java.io.IOException) {
-                busy = false; runOnUiThread { status.text = "Can't reach laptop: ${e.message}" }
+                runOnUiThread { status.text = "Can't reach laptop: ${e.message}" }
+                commandService("Connection error")
             }
+
             override fun onResponse(call: Call, response: Response) {
-                val txt = response.body?.string() ?: ""; busy = false
+                val txt = response.body?.string() ?: ""
                 runOnUiThread {
-                    if (response.code == 401) { status.text = "Wrong PIN"; return@runOnUiThread }
                     try {
                         val j = JSONObject(txt)
-                        val heard = j.optString("heard"); val reply = j.optString("reply")
-                        if (heard.isBlank() && reply.isBlank()) { status.text = "Listening…"; return@runOnUiThread }
+                        val heard = j.optString("heard", text)
+                        val reply = j.optString("reply")
                         transcript.text = "You: $heard\n\nLeha: $reply"
-                        if (reply.isNotBlank()) speak(reply) else status.text = "Listening…"
-                    } catch (e: Exception) { status.text = "Listening…" }
+                        if (reply.isNotBlank()) speak(reply) else status.text = "Sent"
+                    } catch (_: Exception) {
+                        status.text = "Server HTTP ${response.code}"
+                    }
                 }
             }
         })
@@ -220,16 +260,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onInit(s: Int) {
         tts?.language = Locale.UK
-        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-            override fun onStart(id: String?) { speaking = true; runOnUiThread { status.text = "Leha speaking…" } }
-            override fun onDone(id: String?) { speaking = false; runOnUiThread { if (listening) status.text = "Listening… just talk" } }
-            @Deprecated("deprecated") override fun onError(id: String?) { speaking = false }
-        })
     }
+
     private fun speak(t: String) {
-        speaking = true
         tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "leha")
     }
 
-    override fun onDestroy() { listening = false; tts?.shutdown(); super.onDestroy() }
+    override fun onDestroy() {
+        listening = false
+        try { unregisterReceiver(serviceReceiver) } catch (_: Exception) {}
+        tts?.shutdown()
+        super.onDestroy()
+    }
 }

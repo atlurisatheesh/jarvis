@@ -13,6 +13,7 @@ LOG_DIR = str(BASE_DIR.parent / "logs")
 LOG_FILE_NAME = os.environ.get("LEHA_LOG_FILE", "leha.log")
 LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "7"))
 LOG_MAX_SIZE_MB = int(os.environ.get("LOG_MAX_SIZE_MB", "10"))
+CRASH_ALERTS_ENABLED = os.environ.get("CRASH_ALERTS_ENABLED", "true").lower() == "true"
 
 # --- Brain ---
 # Engine: "groq" (cloud, instant), "local" (Ollama on CPU), "auto" (Groq → local fallback)
@@ -20,7 +21,7 @@ LOG_MAX_SIZE_MB = int(os.environ.get("LOG_MAX_SIZE_MB", "10"))
 # rate-limit/network error. Rate-limit raises -> silent local fallback (no double
 # reply). Local qwen2.5:3b alone handles 80+ tools poorly, so prefer auto.
 BRAIN_ENGINE = "auto"
-GROQ_BRAIN_MODEL = "llama-3.1-8b-instant"   # higher daily limit + faster than 70b
+GROQ_BRAIN_MODEL = "llama-3.3-70b-versatile"   # smarter + better tool-calling than 8b
 # Only send these tools to the cloud brain (keeps each request small -> under
 # the free-tier 6000 tokens/min limit). Reflexes in assistant_core handle the
 # rest locally. Empty/None = send all (will hit rate limits).
@@ -36,14 +37,63 @@ GROQ_TOOL_ALLOWLIST = [
     "google_gmail_search", "google_drive_search", "google_contacts_search",
     "google_calendar_create", "google_gmail_send",
 ]
-GROQ_TIMEOUT_SECONDS = 12
+GROQ_TIMEOUT_SECONDS = 5
 OPENAI_BRAIN_MODEL = os.environ.get("OPENAI_BRAIN_MODEL", "gpt-4.1-mini").strip()
-OPENAI_BRAIN_TIMEOUT_SECONDS = 12
+OPENAI_BRAIN_TIMEOUT_SECONDS = 6
 
 # --- Cloudflare Workers AI (primary cloud brain when configured) ---
 # Store only a freshly created, least-privilege Workers AI token in
 # D:\jarvis\.cloudflare_token. The account id can be supplied through the
 # environment or the legacy .cloudflare_creds file. Neither file is committed.
+def _parse_cloudflare_creds(raw: str) -> tuple[str, str]:
+    """Parse local Cloudflare credentials without logging secrets.
+
+    Accepted formats:
+      account_id:api_token
+      account_id=<id>\napi_token=<token>
+      CLOUDFLARE_ACCOUNT_ID=<id>\nCLOUDFLARE_API_TOKEN=<token>
+
+    Older setup notes used a single colon-separated line. Newer notes often
+    paste labelled values, so keep both forms working.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "", ""
+
+    if "\n" not in raw and raw.count(":") == 1:
+        a, _, t = raw.partition(":")
+        return a.strip(), t.strip()
+
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+        elif ":" in line:
+            k, _, v = line.partition(":")
+        else:
+            continue
+        key = k.strip().lower().replace(" ", "_").replace("-", "_")
+        values[key] = v.strip().strip('"').strip("'")
+
+    account = (
+        values.get("cloudflare_account_id")
+        or values.get("account_id")
+        or values.get("account")
+        or values.get("accountid")
+    )
+    token = (
+        values.get("cloudflare_api_token")
+        or values.get("api_token")
+        or values.get("apikey")
+        or values.get("api_key")
+        or values.get("token")
+    )
+    return account or "", token or ""
+
+
 def _load_cloudflare():
     acct = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
     tok = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
@@ -57,21 +107,28 @@ def _load_cloudflare():
     f = BASE_DIR.parent / ".cloudflare_creds"
     if f.exists():
         raw = f.read_text(encoding="utf-8").strip()
-        if ":" in raw:
-            a, _, t = raw.partition(":")
-            return a.strip(), t.strip()
+        acct, tok = _parse_cloudflare_creds(raw)
+        if acct and tok:
+            return acct, tok
     return "", ""
 
 
 CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN = _load_cloudflare()
-# A token pasted into a chat or terminal history should be treated as exposed.
-# Keep this opt-in so Leha cannot accidentally send requests with an old token.
-CF_BRAIN_ENABLED = os.environ.get("CF_BRAIN_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+# "auto" enables Cloudflare only when both account id and token are present.
+# Set CF_BRAIN_ENABLED=0 to force-disable, or 1 to force-enable.
+_CF_ENABLED_RAW = os.environ.get("CF_BRAIN_ENABLED", "auto").strip().lower()
+CF_BRAIN_ENABLED = (
+    _CF_ENABLED_RAW in {"1", "true", "yes", "on"}
+    or (
+        _CF_ENABLED_RAW in {"", "auto"}
+        and bool(CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN)
+    )
+)
 CF_BRAIN_MODEL = os.environ.get(
-    "CF_BRAIN_MODEL", "@cf/meta/llama-3.1-8b-instruct-fast"
+    "CF_BRAIN_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 ).strip()
 # Avoid making the voice loop wait behind a cold or overloaded remote model.
-CF_BRAIN_TIMEOUT_SECONDS = 12
+CF_BRAIN_TIMEOUT_SECONDS = 5
 # Do not block the always-on microphone while retrying a throttled cloud model.
 # A short spoken status is better than a frozen assistant.
 GROQ_RATE_LIMIT_RETRY_SECONDS = 0
@@ -79,6 +136,51 @@ GROQ_RATE_LIMIT_REPLY = "My fast brain is busy for a moment, Sir. Please try aga
 # Skip a cloud provider briefly after it fails or rate-limits instead of making
 # every new spoken command wait for the same known-bad request.
 PROVIDER_COOLDOWN_SECONDS = 45
+
+# --- NVIDIA API / GLM brain ---
+# NVIDIA NIM/OpenAI-compatible endpoint. Store the key in D:\jarvis\.nvidia_key
+# or env NVIDIA_API_KEY. Default model matches the NVIDIA Integrate snippet.
+# Key from env or local gitignored file (.nvidia_key).
+def _load_nvidia_key() -> str:
+    key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if key:
+        return key
+    path = BASE_DIR.parent / ".nvidia_key"
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    return ""
+
+
+NVIDIA_API_KEY = _load_nvidia_key()
+NVIDIA_BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
+NVIDIA_BRAIN_MODEL = os.environ.get("NVIDIA_BRAIN_MODEL", "z-ai/glm-5.2").strip()
+NVIDIA_INDIAN_LANGUAGE_MODEL = os.environ.get("NVIDIA_INDIAN_LANGUAGE_MODEL", "sarvamai/sarvam-m").strip()
+NVIDIA_BRAIN_TIMEOUT_SECONDS = int(os.environ.get("NVIDIA_BRAIN_TIMEOUT_SECONDS", "8"))
+# Put NVIDIA first when enabled. Set NVIDIA_BRAIN_PRIORITY=0 to place it after
+# Cloudflare in the fallback chain.
+NVIDIA_BRAIN_PRIORITY = os.environ.get("NVIDIA_BRAIN_PRIORITY", "1").lower() in {"1", "true", "yes", "on"}
+# Auto-enable when key is present. Set NVIDIA_BRAIN_ENABLED=0 to force-disable.
+_NV_ENABLED_RAW = os.environ.get("NVIDIA_BRAIN_ENABLED", "auto").strip().lower()
+NVIDIA_BRAIN_ENABLED = (
+    _NV_ENABLED_RAW in {"1", "true", "yes", "on"}
+    or (_NV_ENABLED_RAW in {"", "auto"} and bool(NVIDIA_API_KEY))
+)
+
+# Sarvam AI direct API fallback for Indian-language turns. NVIDIA Sarvam stays
+# first priority; this is used only if NVIDIA fails/rate-limits.
+SARVAM_API_KEY = (
+    os.environ.get("SARVAM_API_KEY", "").strip()
+    or ((BASE_DIR.parent / ".sarvam_key").read_text(encoding="utf-8").strip()
+        if (BASE_DIR.parent / ".sarvam_key").exists() else "")
+)
+SARVAM_BASE_URL = os.environ.get("SARVAM_BASE_URL", "https://api.sarvam.ai/v1").strip()
+SARVAM_CHAT_MODEL = os.environ.get("SARVAM_CHAT_MODEL", "sarvam-30b").strip()
+SARVAM_TIMEOUT_SECONDS = int(os.environ.get("SARVAM_TIMEOUT_SECONDS", "8"))
+_SARVAM_ENABLED_RAW = os.environ.get("SARVAM_AI_ENABLED", "auto").strip().lower()
+SARVAM_AI_ENABLED = (
+    _SARVAM_ENABLED_RAW in {"1", "true", "yes", "on"}
+    or (_SARVAM_ENABLED_RAW in {"", "auto"} and bool(SARVAM_API_KEY))
+)
 
 # Circuit breaker thresholds (Phase 2).  A provider is opened after this many
 # consecutive failures; it stays open for PROVIDER_COOLDOWN_SECONDS, then
@@ -94,6 +196,16 @@ SKILL_CACHE_MAX_SIZE = int(os.environ.get("SKILL_CACHE_MAX_SIZE", "128"))
 # Background job queue (Phase 2).  Long-running actions run in the background.
 BACKGROUND_JOBS_ENABLED = os.environ.get("BACKGROUND_JOBS_ENABLED", "true").lower() == "true"
 BACKGROUND_JOBS_WORKERS = int(os.environ.get("BACKGROUND_JOBS_WORKERS", "2"))
+
+# Proactive notifier (Phase D). Background jobs/reminders can announce through
+# the one central speech queue instead of creating a second voice.
+NOTIFIER_ENABLED = os.environ.get("NOTIFIER_ENABLED", "true").lower() == "true"
+NOTIFIER_MAX_QUEUE = int(os.environ.get("NOTIFIER_MAX_QUEUE", "50"))
+PROACTIVE_SPEAK_BACKGROUND_JOBS = os.environ.get("PROACTIVE_SPEAK_BACKGROUND_JOBS", "true").lower() == "true"
+PROACTIVE_SPEAK_ONLY_USEFUL = os.environ.get("PROACTIVE_SPEAK_ONLY_USEFUL", "true").lower() == "true"
+PROACTIVE_MAX_SPOKEN_PER_HOUR = int(os.environ.get("PROACTIVE_MAX_SPOKEN_PER_HOUR", "8"))
+PROACTIVE_QUIET_HOURS_START = os.environ.get("PROACTIVE_QUIET_HOURS_START", "22:30").strip()
+PROACTIVE_QUIET_HOURS_END = os.environ.get("PROACTIVE_QUIET_HOURS_END", "07:00").strip()
 
 # Acoustic echo cancellation (Phase 3).  Software AEC enables barge-in with
 # laptop speakers; hardware headsets do AEC in the device itself.
@@ -120,7 +232,7 @@ OLLAMA_HOST = "http://127.0.0.1:11434"
 # Local brain model (used when BRAIN_ENGINE="local" or as auto fallback).
 BRAIN_MODEL = "qwen2.5:3b"
 # Cap reply length -> faster finish + shorter spoken answers.
-BRAIN_NUM_PREDICT = 80       # enough for a full spoken sentence
+BRAIN_NUM_PREDICT = 60       # shorter voice replies finish faster
 # Keep the model loaded in RAM so it doesn't reload (adds latency) between turns.
 BRAIN_KEEP_ALIVE = "30m"
 ASSISTANT_NAME = "Leha"
@@ -151,10 +263,25 @@ DEVICE_RATE_LIMIT_PER_MINUTE = int(os.environ.get("DEVICE_RATE_LIMIT_PER_MINUTE"
 # --- Structured memory (Phase 8) ---
 STRUCTURED_MEMORY_ENABLED = os.environ.get("STRUCTURED_MEMORY_ENABLED", "true").lower() == "true"
 
+# --- Persistent/semantic conversation memory (Phases B/C) ---
+# Recent turns are stored as JSON and rehydrated into new brains after restart.
+# Semantic memory uses the existing ChromaDB/RAG stack in the background so
+# normal spoken replies do not wait on embeddings.
+CONVERSATION_PERSIST_ENABLED = os.environ.get("CONVERSATION_PERSIST_ENABLED", "true").lower() == "true"
+CONVERSATION_PERSIST_TURNS = int(os.environ.get("CONVERSATION_PERSIST_TURNS", "50"))
+SEMANTIC_MEMORY_ENABLED = os.environ.get("SEMANTIC_MEMORY_ENABLED", "true").lower() == "true"
+SEMANTIC_MEMORY_INJECT_ENABLED = os.environ.get("SEMANTIC_MEMORY_INJECT_ENABLED", "false").lower() == "true"
+SEMANTIC_MEMORY_RESULTS = int(os.environ.get("SEMANTIC_MEMORY_RESULTS", "3"))
+
+# --- Startup health gate (Phase E) ---
+STARTUP_HEALTH_GATE_ENABLED = os.environ.get("STARTUP_HEALTH_GATE_ENABLED", "true").lower() == "true"
+STARTUP_HEALTH_REQUIRED = {"mic", "ears", "brain"}
+MIC_SELF_TEST_SECONDS = float(os.environ.get("MIC_SELF_TEST_SECONDS", "0.25"))
+
 # Home Assistant knobs (Phase 7) are defined lower down, after _load_secret.
 # Use the activation sound instead of speaking the name back. A spoken wake
 # acknowledgement can be heard by the microphone and retrigger local models.
-SPEAK_WAKE_ACK = True
+SPEAK_WAKE_ACK = False
 
 SYSTEM_PROMPT = (
     "You are Leha, a capable voice assistant on the user's Windows laptop. "
@@ -184,6 +311,11 @@ SYSTEM_PROMPT = (
     "To check or change something on the computer (disk, processes, files, settings), call "
     "run_command instead of asking the user to provide it. "
     "Answer in ONE short sentence, max ~15 words, no markdown. Give the answer directly -- "
+    "Understand and reply in Indian languages including Hindi, Telugu, Tamil, Kannada, "
+    "Malayalam, Marathi, Gujarati, Bengali, and Hinglish. Reply in the same language "
+    "or mixed style the user used unless they ask for another language. "
+    "Never expose reasoning or narration like 'the user asked', 'let me recall', "
+    "'I know that', or translation explanation; just answer. "
     "NO filler, NO 'if you need anything else', NO restating the question. "
     "Never invent tool output. If truly ambiguous, ask one short question."
 )
@@ -191,7 +323,7 @@ SYSTEM_PROMPT = (
 # --- Ears (speech-to-text) ---
 # "auto" prefers Deepgram, then OpenAI, then Groq, then local Whisper based
 # on available keys. Deepgram is the active low-latency ears provider.
-STT_ENGINE = os.environ.get("STT_ENGINE", "deepgram").strip().lower()
+STT_ENGINE = os.environ.get("STT_ENGINE", "auto").strip().lower()
 # Key from env, or a local gitignored file (.groq_key) next to the project.
 def _load_groq_key():
     k = os.environ.get("GROQ_API_KEY", "").strip()
@@ -218,7 +350,7 @@ def _load_secret(name: str, filename: str = "") -> str:
 WHISPER_MODEL = "small"       # used when STT_ENGINE="local"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE = "int8"
-WHISPER_LANG = "en"           # set None for auto-detect (Telugu/Hindi, slower)
+WHISPER_LANG = os.environ.get("WHISPER_LANG", "").strip() or None
 
 # Optional cloud speech-to-text providers. Keep keys in environment variables
 # or local ignored files next to the project: .deepgram_key / .openai_key.
@@ -228,7 +360,7 @@ DEEPGRAM_STT_MODEL = os.environ.get("DEEPGRAM_STT_MODEL", "nova-3").strip()
 # variable previously overrode it and caused OpenAI fallback 401 errors.
 OPENAI_API_KEY = _load_secret("", ".openai_key") or os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_STT_MODEL = os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe").strip()
-STT_REQUEST_TIMEOUT_SECONDS = 5
+STT_REQUEST_TIMEOUT_SECONDS = 3
 # Keep an always-on assistant responsive. Set True only when local Whisper is
 # already warm and you explicitly prefer a slow offline fallback.
 STT_CLOUD_FALLBACK_TO_LOCAL = False
@@ -251,11 +383,28 @@ PORCUPINE_ACCESS_KEY = os.environ.get("PORCUPINE_ACCESS_KEY", "").strip()
 # Without it, falls back to built-in "jarvis" keyword (say "Jarvis" to wake)
 PORCUPINE_KEYWORD_PATH = os.environ.get("PORCUPINE_KEYWORD_PATH", "").strip()
 
-# openwakeword (offline, no signup — only works with clean mic, e.g. Jabra USB)
-# Set OWW_ENABLED=True only after confirming: python diag_oww.py shows rms > 100
+# openwakeword (offline, no signup, no API key — runs entirely locally)
+# Pre-trained "hey_jarvis" model downloads on first run (~30MB).
+# Falls back to Whisper substring matching if OWW_ENABLED is False.
+# Priority: Porcupine > openWakeWord > local ONNX > Whisper fallback.
 OWW_ENABLED = False
-OWW_MODEL_NAME = "hey_jarvis"  # only used when OWW_MODEL_PATH is empty
-OWW_MODEL_PATH = os.environ.get("OWW_MODEL_PATH", "").strip()
+# Custom trained "Leha" models (from kaggle_wake_job/train_leha_oww.ipynb).
+# All listed models load simultaneously — either phrase wakes Leha.
+# Files are missing until you train them; missing entries are skipped safely.
+# NOTE (2026-07-03): OWW disabled until a real trained `leha.onnx` openwakeword
+# model is produced. The configured custom files (leha.onnx / hey_leha.onnx) do
+# not exist on disk, so OWW fell back to the built-in "hey jarvis" wake word —
+# Leha would only respond to "hey jarvis", NOT "leha". With OWW off, the
+# listener uses the fuzzy transcript wake (Deepgram STT + wake_phrases) which
+# recognises "Leha" and its common STT manglings. Long-term fix: train a Leha
+# openwakeword model via kaggle_wake_job/train_leha_oww.ipynb and drop it at
+# voices/leha.onnx, then set OWW_ENABLED = True again.
+OWW_CUSTOM_MODELS = [
+    "voices/leha.onnx",       # single-word wake: "leha"
+    "voices/hey_leha.onnx",   # two-word wake: "hey leha"
+]
+OWW_MODEL_NAME = "hey_jarvis"  # built-in fallback when no custom models present
+OWW_MODEL_PATH = os.environ.get("OWW_MODEL_PATH", "").strip()  # legacy single path
 OWW_THRESHOLD = 0.5   # 0.3=sensitive, 0.7=strict
 
 # Locally trained Leha wake model. This lightweight ONNX detector is trained
@@ -263,15 +412,40 @@ OWW_THRESHOLD = 0.5   # 0.3=sensitive, 0.7=strict
 CUSTOM_WAKE_MODEL_PATH = os.environ.get(
     "CUSTOM_WAKE_MODEL_PATH", str(BASE_DIR / "voices" / "leha_wake_model.onnx")
 ).strip()
-CUSTOM_WAKE_ENABLED = False
+
+
+def _env_bool_auto(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "auto").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+# Auto-enable the private wake model when the trained ONNX file exists. This
+# makes Leha use a real wake detector before falling back to transcript fuzz.
+CUSTOM_WAKE_ENABLED = _env_bool_auto(
+    "CUSTOM_WAKE_ENABLED",
+    Path(CUSTOM_WAKE_MODEL_PATH).is_file(),
+)
 # The first live test saw speaker/room false positives near 0.951. Recorded
 # Leha samples score near 1.0, so use a conservative production threshold.
 CUSTOM_WAKE_THRESHOLD = 0.995
+CUSTOM_WAKE_REQUIRE_APPROVAL = os.environ.get("CUSTOM_WAKE_REQUIRE_APPROVAL", "true").lower() == "true"
+CUSTOM_WAKE_FORCE_UNAPPROVED = os.environ.get("CUSTOM_WAKE_FORCE_UNAPPROVED", "false").lower() == "true"
+CUSTOM_WAKE_EVAL_REPORT = os.environ.get(
+    "CUSTOM_WAKE_EVAL_REPORT", str(BASE_DIR.parent / "processed" / "wake_eval_report.json")
+).strip()
 
 # Wake word additional settings
 WAKE_COOLDOWN_SECONDS = int(os.environ.get("WAKE_COOLDOWN_SECONDS", "4"))  # seconds after wake to ignore re-trigger
 WAKE_CONFIDENCE_LOG = os.environ.get("WAKE_CONFIDENCE_LOG", "").strip()  # file path for wake confidence log
 WAKE_DASHBOARD_ENABLED = os.environ.get("WAKE_DASHBOARD_ENABLED", "false").lower() == "true"  # system tray dashboard
+# Free local fallback: when no approved neural wake model is active, keep the
+# transcript wake matcher strict. This reduces false wakes from room audio such
+# as "yeah", "layer", "later", or music lyrics being mangled as Leha.
+TRANSCRIPT_WAKE_STRICT = os.environ.get("TRANSCRIPT_WAKE_STRICT", "true").lower() != "false"
 
 # Mic selection + gain. The Windows DEFAULT mic captured silence on this laptop;
 # device 13 ("Microphone Array 4") was the only live one in the scan. Set the
@@ -381,6 +555,10 @@ REQUIRE_TRIGGER = True
 # Ultra mode reflexes: allow safe playback controls like "stop" and "pause"
 # without the wake word, so music can be stopped like Siri/Alexa.
 WAKE_FREE_MEDIA_CONTROLS = True
+# Siri/Alexa-style safety: do not answer normal questions unless the wake word
+# was heard or an active follow-up session is open. Keep only urgent media stop
+# controls wake-free.
+WAKE_FREE_STATUS_QUESTIONS = os.environ.get("WAKE_FREE_STATUS_QUESTIONS", "false").lower() == "true"
 
 # Continuous conversation: after a reply, listen for a follow-up without
 # needing "Hey Leha" again, for this many seconds (0 = off).
@@ -388,7 +566,15 @@ WAKE_FREE_MEDIA_CONTROLS = True
 # Production default stays OFF until the wake detector + echo handling are
 # proven in real rooms. This prevents background conversation from becoming a
 # command after one successful Leha turn.
-FOLLOWUP_SECONDS = 0
+FOLLOWUP_SECONDS = int(os.environ.get("FOLLOWUP_SECONDS", "15"))
+# A bare wake word ("Leha") is different from a completed command. After she
+# answers "Yes, Sir?", keep the gate open briefly for the user's actual request.
+WAKE_ONLY_FOLLOWUP_SECONDS = int(os.environ.get("WAKE_ONLY_FOLLOWUP_SECONDS", "30"))
+# Safety gate: after a bare wake ("Leha" -> "Yes, Sir?"), local/reflex
+# commands are accepted, but unclear text is not sent to the cloud brain unless
+# the user includes the wake word again. This prevents random room audio from
+# becoming tool calls.
+FOLLOWUP_BRAIN_ENABLED = os.environ.get("FOLLOWUP_BRAIN_ENABLED", "true").lower() == "true"
 CONVERSATION_MAX_TURNS = 6
 
 # Voice-activity capture: stop recording after this much silence instead of
@@ -396,7 +582,8 @@ CONVERSATION_MAX_TURNS = 6
 USE_VAD = True
 MAX_COMMAND_SECONDS = 12
 SILENCE_MS = 350             # faster turn-taking; local commands are usually short
-SILENCE_RMS = 280            # int16 RMS threshold for "silence" (post-gain)
+SILENCE_RMS = 80             # int16 RMS threshold; low because laptop mic input is quiet
+VAD_START_MULTIPLIER = float(os.environ.get("VAD_START_MULTIPLIER", "1.8"))
 
 # --- Ultra beat mode ---
 EARCON_ENABLED = True
@@ -474,3 +661,30 @@ FARM_ROBO_PYTHON = r"D:\farm-robo\farm_robot_ai\.venv\Scripts\python.exe"
 # Farm location for weather (default: approx Andhra Pradesh; set yours)
 FARM_LAT = 16.5
 FARM_LON = 80.6
+
+
+def _apply_pro_settings_file() -> None:
+    """Apply dashboard-owned settings after all defaults are defined."""
+    path = MEMORY_DIR / "pro_settings.json"
+    if not path.exists():
+        return
+    try:
+        import json
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if "custom_wake_threshold" in data:
+            globals()["CUSTOM_WAKE_THRESHOLD"] = max(0.50, min(0.9999, float(data["custom_wake_threshold"])))
+        if "barge_in_enabled" in data:
+            globals()["BARGE_IN_ENABLED"] = bool(data["barge_in_enabled"])
+        if "aec_enabled" in data:
+            globals()["AEC_ENABLED"] = bool(data["aec_enabled"])
+        if "proactive_max_spoken_per_hour" in data:
+            globals()["PROACTIVE_MAX_SPOKEN_PER_HOUR"] = max(0, min(60, int(data["proactive_max_spoken_per_hour"])))
+        if "quiet_hours_start" in data:
+            globals()["PROACTIVE_QUIET_HOURS_START"] = str(data["quiet_hours_start"])
+        if "quiet_hours_end" in data:
+            globals()["PROACTIVE_QUIET_HOURS_END"] = str(data["quiet_hours_end"])
+    except Exception:
+        pass
+
+
+_apply_pro_settings_file()

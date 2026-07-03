@@ -87,7 +87,7 @@ random answers, or an open PowerShell window.
 | `jarvis_ai/wake_local_onnx.py` | Lightweight ONNX wake detector with **2-consecutive-hit** logic to reject single-score spikes | ✅ Code ready |
 | `jarvis_ai/wake_trainer.py` | Training pipeline: `_load_wav_16k`, `_window` (center-crop/zero-pad), `_augment` (speed/gain/noise), `_load_clips_from_dirs`, `_build_model` | ✅ Code ready |
 | `jarvis_ai/wake_evaluator.py` | Held-out evaluation: recall ≥ 95%, false-wake ≤ 1% approval gate, metrics JSON | ✅ Code ready |
-| `jarvis_ai/wake_openwakeword.py` | openWakeWord integration path (offline alternative) | ✅ Code ready |
+| `jarvis_ai/wake_openwakeword.py` | openWakeWord integration: offline, no signup, no API key. Uses pre-trained "hey_jarvis" model (~30MB auto-download). Custom "Leha" model can be trained later. | ✅ **PRODUCTION — ACTIVE** |
 | `jarvis_ai/wake_dashboard.py` | System-tray status UI (idle/listening/thinking/speaking/error) — `WAKE_DASHBOARD_ENABLED` | ✅ Code ready, off by default |
 | `jarvis_ai/wake_phrases.py` | **Strict mode**: when `CUSTOM_WAKE_ENABLED`, drops broad aliases ("layla") and keeps only precise triggers; hallucination guard | ✅ Production |
 | `tools/generate_synthetic_wake_data.py` | Synthetic positive+negative WAV generator: `_add_noise`, `_vary_gain`, `_pad_or_crop`, `_save_wav`, `write_manifest` | ✅ Code ready |
@@ -100,11 +100,16 @@ random answers, or an open PowerShell window.
 | `jarvis_ai/voices/wake_leha_continuous/`, `wake_leha_retry/` | Recorded wake clips (owner voice) | ✅ Data exists |
 
 ### Wired into the live loop
-- `config.CUSTOM_WAKE_MODEL_PATH` → `voices/leha_wake_model.onnx`.
-- `config.CUSTOM_WAKE_ENABLED = False` — **intentionally disabled in production.**
+- **openWakeWord is now the PRIMARY wake engine** (`OWW_ENABLED = True`). Wake detection is instant (~80ms chunks), offline, no cloud API.
+  - Pre-trained "hey_jarvis" model — say **"Hey Jarvis"** to wake Leha.
+  - `OWW_THRESHOLD = 0.5` (0.3 = sensitive, 0.7 = strict).
+  - Priority chain: Porcupine > openWakeWord > local ONNX > Whisper fallback.
+- `config.CUSTOM_WAKE_MODEL_PATH` → `voices/leha_wake_model.onnx` (private model, disabled).
+- `config.CUSTOM_WAKE_ENABLED = False` — **intentionally disabled** (private model recall was only 44%).
 - `config.CUSTOM_WAKE_THRESHOLD = 0.995` (conservative — first live test saw speaker false positives near 0.951).
 - `wake_phrases.strict_mode()` returns True only when `CUSTOM_WAKE_ENABLED` is True.
-- **Live wake still uses transcript matching** (Porcupine path also available via `wake_porcupine.py`).
+- `wake_phrases` now includes "hey jarvis", "jarvis" as valid triggers for the Whisper fallback path.
+- Porcupine path available via `wake_porcupine.py` (Picovoice now requires commercial approval — blocked).
 
 ### Tests — `test_phase1.py` (22) + `test_wake_model.py` (8)
 - **Strict mode (6):** default off, on when custom enabled, broad alias dropped in strict, precise kept, hallucination uses strict fragments.
@@ -115,9 +120,47 @@ random answers, or an open PowerShell window.
 - `test_wake_model.py` 2 failures are **Windows temp-file lock cleanup issues** (`PermissionError WinError 32` on `unlink`), not logic failures — the assertions themselves pass.
 
 ### Pending / known gaps
-1. **Real-world wake accuracy not yet measured** against the acceptance bar (≥95% recall, <1 false wake/hr). The model is trained; live threshold tuning is a manual measurement task.
-2. `CUSTOM_WAKE_ENABLED` stays False until the live false-positive rate is validated.
-3. Broad fuzzy aliases ("layla") remain as a short-term fallback per the roadmap.
+1. **openWakeWord "hey jarvis" is the live wake engine** until custom "Leha" models are trained.
+2. **Custom "Leha" wake word training** — Colab notebook ready (`kaggle_wake_job/train_leha_oww.ipynb`), awaiting user run + download. Will replace "hey jarvis".
+3. `CUSTOM_WAKE_ENABLED` stays False — the private ONNX model (44% recall) is not viable. openWakeWord replaces it.
+4. Broad fuzzy aliases ("layla") remain in the transcript fallback trigger list.
+
+### 2026-07-03 custom "Leha" openWakeWord training pipeline
+- **New:** `kaggle_wake_job/train_leha_oww.ipynb` — Colab notebook trains two custom
+  openWakeWord models ("leha" + "hey leha") using **synthetic TTS** (Piper), not real
+  recordings. This replaces the abandoned `wake_trainer.py` path (which needed 100+ real
+  clips and only reached 44% recall). Same pipeline openWakeWord uses for all official models.
+- **New:** `kaggle_wake_job/train_leha_oww.md` — step-by-step instructions + troubleshooting.
+- **New:** `scripts/install_leha_wake_model.ps1` — copies downloaded `.onnx` files into
+  `jarvis_ai/voices/`, smoke-tests they load, reports active engine. No config editing.
+- **Upgraded:** `wake_openwakeword.py` now loads **multiple** models simultaneously — any
+  one firing wakes Leha. Reports which phrase triggered in the log. Backward compatible.
+- **Upgraded:** `config.py` adds `OWW_CUSTOM_MODELS = ["voices/leha.onnx", "voices/hey_leha.onnx"]`.
+  Missing files are skipped safely; falls back to built-in "hey_jarvis" until trained.
+- **Workflow:** Run Colab notebook (~30 min on free GPU) → download 2 `.onnx` files →
+  run `install_leha_wake_model.ps1` → restart Leha → say "Leha" or "Hey Leha".
+
+### 2026-07-02 openWakeWord activation update
+- **Enabled openWakeWord as the primary wake engine** (`OWW_ENABLED = True`).
+- Picovoice/Porcupine is no longer viable (commercial approval required for new accounts;
+  free-tier AccessKeys expired June 30, 2026).
+- openWakeWord is fully free, offline, no API key, no signup — runs entirely locally.
+- Pre-trained "hey_jarvis" model auto-downloads on first run (~30MB).
+- Wake detection is now **instant** (~80ms chunks) vs. the old 2-3 second Whisper fallback.
+- Say **"Hey Jarvis"** to wake Leha. This is temporary until a custom "Leha" model is trained.
+
+### 2026-07-02 wake-model validation update (historical)
+- Added `tools/build_leha_wake_dataset.py` to create separate train and held-out wake datasets.
+- Fixed `wake_trainer._augment()` so speed-perturbed clips are always returned to exactly 1 second.
+- Fixed `wake_local_onnx` runtime scoring so it accepts both rank-2 and rank-3 ONNX model inputs.
+- Current recorded wake data is not production-ready: 37 of 75 recorded positive clips were rejected as too quiet/silent (`rms < 0.005`).
+- Candidate model trained on clean real positives only:
+  - best checked result: 44.4% held-out recall, 1.4% false-wake at threshold 0.9.
+  - **not approved, not deployed.**
+- Candidate model trained on clean real positives plus synthetic Leha positives:
+  - best checked result: 33.3% held-out recall, 1.4% false-wake at threshold 0.95.
+  - **not approved, not deployed.**
+- Production remains on **openWakeWord** (instant offline wake via "hey jarvis" model).
 
 ---
 

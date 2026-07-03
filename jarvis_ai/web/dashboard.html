@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Leha Pro Dashboard</title>
+<style>
+:root{--bg:#0b0f14;--panel:#111820;--line:#273647;--text:#e5edf5;--muted:#8aa0b8;--ok:#57d68d;--warn:#ffb86b;--bad:#ff6b6b;--accent:#38bdf8}
+*{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
+main{max-width:1240px;margin:0 auto;padding:22px}header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+h1{font-size:24px;margin:0}.sub{color:var(--muted);font-size:13px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.k{color:var(--muted);font-size:11px;text-transform:uppercase}.v{font-size:20px;margin-top:6px}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}@media(max-width:900px){.panels{grid-template-columns:1fr}}
+input,button{background:#0d141c;color:var(--text);border:1px solid #34475a;border-radius:6px;padding:8px}button{cursor:pointer}button:hover{border-color:var(--accent)}
+label{display:block;color:var(--muted);font-size:12px;margin:8px 0 4px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+pre{white-space:pre-wrap;background:#080c10;border:1px solid #1b2733;border-radius:8px;padding:12px;overflow:auto;max-height:320px}
+.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;color:var(--muted);font-size:12px;margin-right:6px}
+</style>
+</head>
+<body><main>
+<header>
+  <div><h1>Leha Pro Dashboard</h1><div class="sub" id="summary">Locked</div></div>
+  <div class="row"><input id="pin" placeholder="PIN" inputmode="numeric" /><button onclick="savePin()">Unlock</button><button onclick="load()">Refresh</button></div>
+</header>
+<section class="grid" id="cards"></section>
+<section class="panels">
+  <div class="panel">
+    <h3>Controls</h3>
+    <label>Wake threshold <span id="thresholdLabel"></span></label>
+    <input id="wakeThreshold" type="range" min="0.50" max="0.999" step="0.001" />
+    <label><input id="bargeIn" type="checkbox" /> Barge-in enabled</label>
+    <label><input id="aecEnabled" type="checkbox" /> AEC validated/enabled</label>
+    <label>Spoken proactive cap per hour</label>
+    <input id="spokenCap" type="number" min="0" max="60" />
+    <div class="row" style="margin-top:10px"><button onclick="saveSettings()">Save settings</button><span class="sub">Restart listener to apply wake/barge changes.</span></div>
+  </div>
+  <div class="panel">
+    <h3>Provider And Latency</h3>
+    <pre id="latency"></pre>
+  </div>
+</section>
+<section class="panels">
+  <div class="panel"><h3>Gaps</h3><pre id="gaps"></pre></div>
+  <div class="panel"><h3>Wake Validation</h3><pre id="wake"></pre></div>
+</section>
+<section class="panels">
+  <div class="panel"><h3>Recent Logs</h3><pre id="logs"></pre></div>
+  <div class="panel"><h3>Recent Audit</h3><pre id="audit"></pre></div>
+</section>
+</main>
+<script>
+let PIN=localStorage.getItem('leha_pin')||'';document.getElementById('pin').value=PIN;
+function savePin(){PIN=document.getElementById('pin').value.trim();localStorage.setItem('leha_pin',PIN);load();}
+function cls(ok,warn=false){return ok?'ok':(warn?'warn':'bad')}
+function card(k,v,c){return `<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`}
+async function api(path,opts={}){const sep=path.includes('?')?'&':'?';const r=await fetch(path+sep+'pin='+encodeURIComponent(PIN),opts);return await r.json();}
+async function load(){
+ const d=await api('/api/pro/status'); if(d.error){document.getElementById('summary').textContent=d.error;return;}
+ const h=d.health,l=d.latency,v=d.voice,b=d.barge_in,w=d.wake_validation,s=d.settings;
+ document.getElementById('summary').innerHTML=`<span class="pill">${d.assistant}</span><span class="pill">${d.build}</span><span class="pill">state ${d.runtime.state}</span>`;
+ document.getElementById('cards').innerHTML=[
+  card('Wake',`${h.wake_engine} / ${h.wake_reliable}`,cls(h.wake_reliable==='ok')),
+  card('Ears',h.stt_engine,cls(true)),
+  card('Brain',h.cloudflare==='ok'?'Cloudflare':'Fallback',cls(h.cloudflare==='ok',true)),
+  card('Provider',l.last_provider,cls(true)),
+  card('Mic',h.mic_configured,cls(h.mic_configured==='ok')),
+  card('Phone',h.phone_adb,cls(h.phone_adb==='ok',true)),
+  card('Voice',`${v.engine}`,cls(true)),
+  card('Barge-in',b.enabled?'enabled':'off',cls(b.safe_to_enable,true))
+ ].join('');
+ document.getElementById('wakeThreshold').value=s.custom_wake_threshold; document.getElementById('thresholdLabel').textContent=s.custom_wake_threshold;
+ document.getElementById('bargeIn').checked=s.barge_in_enabled; document.getElementById('aecEnabled').checked=s.aec_enabled; document.getElementById('spokenCap').value=s.proactive_max_spoken_per_hour;
+ document.getElementById('latency').textContent=JSON.stringify(l,null,2);
+ document.getElementById('gaps').textContent=(d.gaps||[]).join('\\n')||'No major gaps';
+ document.getElementById('wake').textContent=JSON.stringify(w,null,2);
+ document.getElementById('logs').textContent=(d.logs||[]).join('\\n');
+ document.getElementById('audit').textContent=JSON.stringify(d.audit.recent||[],null,2);
+}
+document.getElementById('wakeThreshold').addEventListener('input',e=>document.getElementById('thresholdLabel').textContent=e.target.value);
+async function saveSettings(){
+ const body={custom_wake_threshold:parseFloat(wakeThreshold.value),barge_in_enabled:bargeIn.checked,aec_enabled:aecEnabled.checked,proactive_max_spoken_per_hour:parseInt(spokenCap.value||'8',10)};
+ const d=await api('/api/pro/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(d.error)alert(d.error); else load();
+}
+setInterval(()=>{if(PIN)load();},5000); if(PIN)load();
+</script></body></html>

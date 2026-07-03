@@ -29,6 +29,31 @@ def _startup_housekeeping() -> None:
         _LOG(f"startup cleanup failed: {e}", component="supervisor", level="WARN")
 
 
+def _notify_crash(message: str) -> None:
+    """Best-effort Windows notification for listener crashes."""
+    if not getattr(config, "CRASH_ALERTS_ENABLED", True):
+        return
+    safe = log_manager.redact(message).replace("'", "''")
+    ps = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$n = New-Object System.Windows.Forms.NotifyIcon; "
+        "$n.Icon = [System.Drawing.SystemIcons]::Warning; "
+        "$n.Visible = $true; "
+        f"$n.ShowBalloonTip(8000, 'Leha crashed', '{safe}', "
+        "[System.Windows.Forms.ToolTipIcon]::Warning); "
+        "Start-Sleep -Seconds 9; "
+        "$n.Dispose()"
+    )
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-Command", ps],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+
 def health_check() -> int:
     """Print a one-shot health summary and return a process exit code.
 
@@ -74,6 +99,8 @@ def main():
 
         ran = time.time() - start
         _LOG(f"listener exited (code={code}) after {ran:.0f}s", component="supervisor")
+        if code not in (0, None):
+            _notify_crash(f"Listener exited with code {code}; supervisor will restart it.")
 
         # crash-loop guard: if >3 restarts in 60s, back off 30s
         now = time.time()

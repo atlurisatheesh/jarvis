@@ -17,12 +17,21 @@ Features:
 - Fast local reflexes: media, volume, time, weather, open/close handled without LLM.
 """
 import threading
+import sys
 import time
+import json
+import re
 try:
     import winsound
 except ImportError:
     winsound = None
 from datetime import datetime
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from . import config
 from . import speaker_profile
@@ -37,7 +46,26 @@ from .ears import Ears
 from .mouth import Mouth
 from .runtime_state import runtime
 from .scheduler import Scheduler
-from .wake_phrases import has_trigger, is_hallucination, normalize_text
+from .wake_phrases import has_trigger, is_hallucination, normalize_text, wake_confidence
+
+
+def _looks_like_raw_tool_reply(text: str) -> bool:
+    s = (text or "").strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE).strip()
+        s = re.sub(r"\s*```$", "", s).strip()
+    if not s.startswith("{"):
+        return False
+    try:
+        obj = json.loads(s)
+    except Exception:
+        head = s[:300].lower()
+        return '"function"' in head and '"parameters"' in head
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("type") == "function":
+        return True
+    return isinstance(obj.get("name"), str) and isinstance(obj.get("parameters"), dict)
 
 # Phase 2/3 modules: lazily wired when their config flags are enabled.
 try:
@@ -120,6 +148,11 @@ class LehaSession:
         self.speech = (speech_manager.get_manager(self.mouth)
                        if config.SPEECH_MANAGER_ENABLED and speech_manager is not None
                        else self.mouth)
+        try:
+            from . import notifier
+            notifier.register_speaker(self.speech)
+        except Exception:
+            pass
         # Phase 2: shared latency budget for per-stage overrun tracking.
         self._budget = (latency_budget.get_latency_budget()
                         if latency_budget is not None else None)
@@ -149,7 +182,8 @@ class LehaSession:
         print("[calibrate] measuring noise floor...", flush=True)
         try:
             self.noise_floor = calibrate_noise_floor(seconds=config.VAD_CALIBRATION_SECONDS)
-            self.start_rms = max(int(config.SILENCE_RMS), int(self.noise_floor * 3.0))
+            multiplier = float(getattr(config, "VAD_START_MULTIPLIER", 1.8))
+            self.start_rms = max(int(config.SILENCE_RMS), int(self.noise_floor * multiplier))
             print(f"[calibrate] noise={self.noise_floor:.1f} start_rms={self.start_rms}", flush=True)
         except Exception as e:
             print(f"[calibrate] failed: {e}", flush=True)
@@ -251,7 +285,7 @@ class LehaSession:
                     return False
 
             if force_active:
-                self.session.activate()
+                self.session.activate(getattr(config, "WAKE_ONLY_FOLLOWUP_SECONDS", 8))
 
             # Track whether streaming brain ran (already spoke via say_stream)
             _streamed = [False]
@@ -261,7 +295,14 @@ class LehaSession:
 
             result = self.session.handle(text, _ask_streaming_tracked)
             if result.ignored_reason:
-                print(f"[debug] ignored: {result.ignored_reason}", flush=True)
+                if result.ignored_reason == "no wake trigger":
+                    print(
+                        f"[debug] ignored: {result.ignored_reason} "
+                        f"wake_conf={wake_confidence(text):.2f}",
+                        flush=True,
+                    )
+                else:
+                    print(f"[debug] ignored: {result.ignored_reason}", flush=True)
                 runtime.set("idle")
                 return False
 
@@ -300,7 +341,49 @@ class LehaSession:
         runtime.set("speaking")
         # Route through self.speech (SpeechManager) so generation tracking
         # stays consistent and is_speaking() reflects reality.
-        spoken = self.speech.say_stream(token_gen)
+        raw_tool_reply = [""]
+
+        def guarded_tokens():
+            first = []
+            decided = False
+            json_candidate = False
+            for token in token_gen:
+                if decided:
+                    yield token
+                    continue
+                first.append(token)
+                preview = "".join(first)
+                stripped = preview.lstrip()
+                if not stripped:
+                    continue
+                if stripped.startswith("```json"):
+                    json_candidate = True
+                    continue
+                if stripped.startswith("{"):
+                    json_candidate = True
+                    continue
+                decided = True
+                yield preview
+            if not decided:
+                full = "".join(first)
+                if json_candidate and _looks_like_raw_tool_reply(full):
+                    raw_tool_reply[0] = full
+                    print("[guard] suppressed raw tool JSON from brain provider", flush=True)
+                    return
+                if full:
+                    yield full
+
+        spoken = self.speech.say_stream(guarded_tokens())
+        if raw_tool_reply[0] and not spoken.strip():
+            spoken = "I understood that as a command, Sir, but I blocked unsafe raw command speech."
+        # Persist the streaming turn so context survives restarts. The blocking
+        # ask() path persists inside Brain; streaming persists here because this
+        # is where the full reply text is reassembled.
+        try:
+            from . import conversation_store
+            conversation_store.save_turn(text, spoken)
+        except Exception:
+            pass
         return spoken  # return full text so session can store it
 
     # ── Generic wake-engine runner (shared by Porcupine + OWW) ───────
@@ -316,6 +399,7 @@ class LehaSession:
                 max_seconds=config.MAX_COMMAND_SECONDS,
                 min_samples=6000,
                 start_rms=self.start_rms,
+                session_active=self.session.is_active,
             ):
                 if self._quit:
                     break
@@ -332,7 +416,7 @@ class LehaSession:
                     if config.SPEAK_WAKE_ACK:
                         self._say("Ready.")
                         self.speech.join(timeout=3.0)
-                    self.session.activate()
+                    self.session.activate(getattr(config, "WAKE_ONLY_FOLLOWUP_SECONDS", 8))
                 else:
                     if self._handle_audio(event, force_active=True):
                         self._quit = True
@@ -371,6 +455,12 @@ class LehaSession:
             f"  Free key: https://console.picovoice.ai/",
             flush=True,
         )
+        if getattr(config, "TRANSCRIPT_WAKE_STRICT", True):
+            print(
+                "[wake/transcript] strict mode active: broad false-wake aliases "
+                "such as layer/later/lear are blocked.",
+                flush=True,
+            )
         print(f"Mic always open. Say '{config.ASSISTANT_NAME} ...'. Ctrl+C to quit.", flush=True)
 
         try:
@@ -397,6 +487,18 @@ class LehaSession:
         heartbeat.start()
         recovery_attempts = 0
         try:
+            if getattr(config, "STARTUP_HEALTH_GATE_ENABLED", True):
+                try:
+                    from . import health
+                    ok, issues = health.startup_gate()
+                    if ok:
+                        print("[startup-health] ok", flush=True)
+                    else:
+                        msg = "Startup health needs attention: " + ", ".join(issues)
+                        print(f"[startup-health] {msg}", flush=True)
+                        self._say(msg + ".")
+                except Exception as e:
+                    print(f"[startup-health] check failed: {e}", flush=True)
             self.calibrate()
             _play_earcon("startup")
             self._say(f"{config.ASSISTANT_NAME} online.")
@@ -430,6 +532,11 @@ class LehaSession:
             self._heartbeat_stop.set()
             runtime.set("offline")
             print(f"{config.ASSISTANT_NAME} offline.")
+            try:
+                from . import notifier
+                notifier.unregister_speaker(self.speech)
+            except Exception:
+                pass
             self.speech.stop()
 
 

@@ -91,7 +91,7 @@ def _augment(audio: np.ndarray, rate: int = 16000) -> np.ndarray:
         shift = random.randint(-int(0.1 * rate), int(0.1 * rate))
         aug = np.roll(aug, shift)
 
-    return aug.astype(np.float32)
+    return _window(aug.astype(np.float32))
 
 
 # ---------------------------------------------------------------------------

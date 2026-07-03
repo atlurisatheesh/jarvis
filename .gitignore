@@ -5,6 +5,8 @@
 .cloudflare_token
 .cloudflare_account_id
 .hf_token
+.nvidia_key
+.sarvam_key
 voice_gpu_bundle.zip
 leha_gpu_outputs.zip
 kaggle_voice_job/

@@ -1,73 +1,119 @@
-# Leha — Native Android App
+# Leha Android App
 
-A real native phone app (home-screen icon, press-to-talk, native voice out) that
-talks to the Leha web server running on your laptop.
+Native Android client for Leha. The laptop remains the brain and tool runner;
+the phone is the always-on microphone, status UI, and speaker.
 
-> The brain + 81 tools run on the **laptop**. This app is the phone front-end.
-> Phone and laptop must be on the **same Wi-Fi** (or use a tunnel for anywhere).
+## Current Mode
 
-## What it does (v2 — hands-free)
+- Foreground service owns the microphone.
+- With a Picovoice AccessKey, the service arms Porcupine and waits for a wake word.
+- If `app/src/main/assets/leha_android.ppn` exists, the wake word is `Leha`.
+- If no custom model is bundled but an AccessKey exists, it falls back to built-in `Jarvis`.
+- If no AccessKey is saved, the app does not hotword-listen after boot. Manual `ARM LEHA` still works using VAD-only command capture.
+- After wake/manual arm, command capture uses VAD plus an 8 second hard cap so it cannot hang forever.
+- Audio is posted to the laptop at `POST /api/voice`.
+- Replies are spoken using Android TTS.
 
-- Real app icon "Leha" on your home screen
-- Tap **START once** → Leha listens continuously ("just talk", Siri-style)
-- Auto-detects when you finish speaking (VAD), sends to laptop, speaks reply,
-  then listens again. Mutes itself while speaking (no self-trigger).
-- Screen stays awake while active
-- Laptop transcribes (Deepgram) + runs the full assistant (92 tools) + replies
-- Reply shown **and spoken** by the phone (native Android TTS)
-- Settings screen for laptop IP + PIN (saved on device)
+## Get Your Free Picovoice Key + Leha Model
 
-Better than Siri at: controlling your actual laptop (apps, files, shell, Windows)
-AND your Android phone (SMS, calls, apps) — Siri can't touch your PC.
+1. Go to `https://console.picovoice.ai`.
+2. Create/log in to your account.
+3. Copy your AccessKey from Account / API Keys.
+4. In the Android app, open Settings and paste the AccessKey.
+5. Optional but recommended: create a custom wake word named `leha`.
+6. Download the Android `.ppn`.
+7. Put it here:
 
-Not yet: "Hey Leha" wake word with screen off (needs a foreground service +
-offline wake model; planned). Today you tap START, then it's hands-free.
+```text
+android-app/app/src/main/assets/leha_android.ppn
+```
 
-## Build it (one time — needs a computer)
+Without the custom `.ppn`, the app can only use the built-in `Jarvis` wake model.
+Without an AccessKey, hotword mode is disabled and manual `ARM LEHA` remains the
+fallback.
 
-You need **Android Studio** (free): https://developer.android.com/studio
+## Build
 
-1. Open Android Studio → **Open** → select this folder: `D:\jarvis\android-app`
-2. Let it sync Gradle + download the Android SDK (first time: a few minutes).
-   Android Studio creates the Gradle wrapper automatically.
-3. Plug your phone in via USB with **USB debugging on** (already enabled).
-4. Top toolbar: pick your phone in the device dropdown → click **Run ▶**.
-5. The app installs and launches. The **Leha** icon stays on your home screen.
-
-To share/install without the cable later:
-- **Build → Build Bundle(s)/APK(s) → Build APK(s)** → find `app-debug.apk` →
-  copy to phone → tap to install (allow "install unknown apps").
-
-## First run
-
-1. Start the laptop server (keep it running):
-   ```powershell
-   cd D:\jarvis
-   python -m jarvis_ai.webserver
-   ```
-   It prints your **laptop IP** and the **PIN**.
-2. Open the Leha app → **Settings** → enter that IP + PIN → Save.
-3. Hold the orb, say "what time is it", release. Leha answers + speaks.
-
-## Talks to
-
-`POST http://<laptop-ip>:8001/api/voice` with header `X-Leha-Pin: <pin>` and a
-multipart `audio` file. Same server + PIN as the web page. Open the firewall once
-(admin PowerShell):
+From `D:\jarvis\android-app`:
 
 ```powershell
-New-NetFirewallRule -DisplayName "Leha Web 8001" -Direction Inbound -LocalPort 8001 -Protocol TCP -Action Allow -Profile Private
+$env:JAVA_HOME="$env:ProgramFiles\Android\Android Studio\jbr"
+$env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_SDK_ROOT="$env:LOCALAPPDATA\Android\Sdk"
+.\gradlew.bat :app:assembleDebug --no-daemon
 ```
 
-## Project layout
+APK output:
 
+```text
+android-app/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Install to connected phone:
+
+```powershell
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+```
+
+## First Run With USB
+
+1. Start Leha on the laptop.
+2. Forward the phone to the laptop server:
+
+```powershell
+adb reverse tcp:8001 tcp:8001
+```
+
+3. In app Settings:
+
+```text
+Laptop IP: 127.0.0.1
+PIN: value from D:\jarvis\.web_pin
+Picovoice AccessKey: optional, required for real hotword
+Sensitivity: 0.7
+```
+
+4. Tap `Test Server`.
+5. Tap `ARM LEHA`.
+
+## First Run With Wi-Fi
+
+Use your laptop Wi-Fi IP in Settings, for example:
+
+```text
+192.168.31.48
+```
+
+Phone and laptop must be on the same Wi-Fi, and Windows firewall must allow
+TCP port `8001`.
+
+## Behavior
+
+- `ARMED`: foreground notification visible, Porcupine waits for wake word.
+- `AWAKE`: command audio is being captured.
+- `THINKING`: laptop is processing.
+- `SPEAKING`: phone TTS is speaking.
+- Then it returns to `ARMED`.
+
+While `THINKING` or `SPEAKING`, the mic loop pauses to prevent self-triggering.
+
+## Boot
+
+The app registers `BOOT_COMPLETED`. After reboot, it only auto-arms if:
+
+- laptop IP is saved, and
+- Picovoice AccessKey is saved.
+
+No AccessKey means no true wake word, so boot autostart is intentionally skipped.
+Use `ARM LEHA` manually in that case.
+
+## Project Layout
+
+```text
 android-app/
-  settings.gradle.kts        project modules
-  build.gradle.kts           plugin versions
-  app/
-    build.gradle.kts         app deps (okhttp)
-    src/main/AndroidManifest.xml
-    src/main/java/com/leha/app/MainActivity.kt   the whole app (UI in code)
-    src/main/res/...         theme + launcher icon
+  app/build.gradle.kts
+  app/src/main/AndroidManifest.xml
+  app/src/main/java/com/leha/app/MainActivity.kt
+  app/src/main/java/com/leha/app/LehaForegroundService.kt
+  app/src/main/java/com/leha/app/BootReceiver.kt
 ```

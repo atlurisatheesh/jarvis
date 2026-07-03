@@ -125,9 +125,21 @@ class BackgroundJobs:
                     job.on_error(job.error)
                 except Exception:
                     pass
+            elif job.error:
+                try:
+                    from . import notifier
+                    notifier.notify_background_error(job.name, job.error)
+                except Exception:
+                    pass
             elif job.on_done:
                 try:
                     job.on_done(job.result)
+                except Exception:
+                    pass
+            else:
+                try:
+                    from . import notifier
+                    notifier.notify_background_done(job.name, job.result)
                 except Exception:
                     pass
 

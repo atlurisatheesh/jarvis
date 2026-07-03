@@ -9,6 +9,7 @@ ask()        — full reply (blocking)
 ask_stream() — yields tokens as they arrive; enables pipeline TTS for <0.5s perceived latency
 """
 import json
+import re
 import time
 from typing import Generator
 
@@ -16,15 +17,92 @@ import ollama
 import requests
 
 from . import config, memory, skills
+from . import conversation_store
+from . import language
 from .runtime_state import runtime
 
 
 def _system_prompt() -> str:
     prompt = config.SYSTEM_PROMPT
+    prompt += "\n" + language.prompt_language_rule()
     facts = memory.all_facts()
     if facts:
         prompt += "\nKnown facts about the user:\n- " + "\n- ".join(facts)
     return prompt
+
+
+def _initial_messages() -> list[dict]:
+    """Build the opening message list: system prompt + rehydrated prior turns.
+
+    Every provider brain starts with a system message. When conversation
+    persistence is enabled, the last few turns from the previous session are
+    spliced in so the model remembers the thread after a restart.
+    """
+    msgs = [{"role": "system", "content": _system_prompt()}]
+    try:
+        prior = conversation_store.as_messages(
+            int(getattr(config, "CONVERSATION_PERSIST_TURNS", 50) // 2)
+        )
+        if prior:
+            msgs.extend(prior)
+    except Exception:
+        pass
+    return msgs
+
+
+def _with_semantic_memory(user_text: str) -> str:
+    """Optionally add semantic memory context to a user turn.
+
+    Disabled by default because embeddings add latency. Explicit memory-search
+    voice commands still use semantic recall even when injection is off.
+    """
+    if not getattr(config, "SEMANTIC_MEMORY_INJECT_ENABLED", False):
+        return user_text
+    try:
+        from . import semantic_memory
+        ctx = semantic_memory.context_for(user_text)
+    except Exception:
+        ctx = ""
+    if not ctx:
+        return user_text
+    return f"{ctx}\n\nCurrent request: {user_text}"
+
+
+def _final_answer_instruction(user_text: str) -> str:
+    """Provider-local instruction to prevent reasoning text in spoken replies."""
+    if language.is_indian_language(user_text):
+        return (
+            "Reply with only the final answer in the same Indian language/script. "
+            "No English explanation. No reasoning. No <think> text. Request: "
+            f"{user_text}"
+        )
+    return user_text
+
+
+def _clean_provider_reply(text: str) -> str:
+    """Remove leaked reasoning wrappers from hosted models before TTS."""
+    reply = (text or "").strip()
+    if "</think>" in reply:
+        reply = reply.split("</think>", 1)[1].strip()
+    if "<think>" in reply:
+        before, _, after = reply.partition("<think>")
+        reply = (before + " " + after).strip()
+    for prefix in (
+        "Okay, the user wants",
+        "Okay, the user asked",
+        "The user asked",
+        "Let me recall",
+        "I need to",
+        "I know that",
+    ):
+        if reply.lower().startswith(prefix.lower()):
+            indic = re.search(r"[\u0900-\u097f\u0980-\u09ff\u0a80-\u0aff\u0b00-\u0b7f\u0b80-\u0bff\u0c00-\u0c7f\u0c80-\u0cff\u0d00-\u0d7f][^\"'\n<>()]*", reply)
+            if indic:
+                return indic.group(0).strip(" .,:;")
+            lines = [line.strip() for line in reply.splitlines() if line.strip()]
+            reply = lines[-1] if lines else reply
+            break
+    return reply.strip()
 
 
 def _openai_tools() -> list:
@@ -58,8 +136,27 @@ class _GroqRateLimited(RuntimeError):
 
 class _GroqBrain:
     def __init__(self):
-        self.messages = [{"role": "system", "content": _system_prompt()}]
+        self.messages = _initial_messages()
         self._tools = _openai_tools()
+
+    def warmup(self):
+        """Cheap ping to warm the Groq connection (avoids cold-start latency)."""
+        try:
+            requests.post(
+                _GROQ_CHAT_URL,
+                headers={
+                    "Authorization": f"Bearer {config.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": config.GROQ_BRAIN_MODEL,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+                timeout=config.GROQ_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            pass
 
     def _trim(self, keep: int = 20):
         if len(self.messages) > keep + 1:
@@ -86,7 +183,7 @@ class _GroqBrain:
         return clean
 
     def ask(self, user_text: str) -> str:
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "user", "content": _with_semantic_memory(user_text)})
         for _ in range(5):
             payload = {
                 "model": config.GROQ_BRAIN_MODEL,
@@ -184,7 +281,7 @@ class _GroqBrain:
         speaking the first sentence while the rest is still generating.
         Tool calls fall back to non-streaming execution then yield the result.
         """
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "user", "content": _with_semantic_memory(user_text)})
         payload = {
             "model": config.GROQ_BRAIN_MODEL,
             "messages": self._clean_messages(),
@@ -324,14 +421,14 @@ class _OpenAIBrain:
     """Cloud fallback for normal conversational turns when Groq is throttled."""
 
     def __init__(self):
-        self.messages = [{"role": "system", "content": _system_prompt()}]
+        self.messages = _initial_messages()
 
     def _trim(self, keep: int = 12):
         if len(self.messages) > keep + 1:
             self.messages = [self.messages[0]] + self.messages[-keep:]
 
     def ask(self, user_text: str) -> str:
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "user", "content": _with_semantic_memory(user_text)})
         response = requests.post(
             _OPENAI_CHAT_URL,
             headers={
@@ -360,7 +457,7 @@ class _CloudflareBrain:
     """
 
     def __init__(self):
-        self.messages = [{"role": "system", "content": _system_prompt()}]
+        self.messages = _initial_messages()
         self._tools = _openai_tools()
         self.url = (f"https://api.cloudflare.com/client/v4/accounts/"
                     f"{config.CLOUDFLARE_ACCOUNT_ID}/ai/v1/chat/completions")
@@ -385,7 +482,7 @@ class _CloudflareBrain:
             pass
 
     def ask(self, user_text: str) -> str:
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "user", "content": _with_semantic_memory(user_text)})
         for _ in range(5):
             r = requests.post(self.url, headers=self._headers, json={
                 "model": config.CF_BRAIN_MODEL,
@@ -424,7 +521,7 @@ class _CloudflareBrain:
 
     def ask_stream(self, user_text: str) -> Generator[str, None, None]:
         """Stream tokens from Cloudflare Workers AI (OpenAI-compatible SSE)."""
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "user", "content": _with_semantic_memory(user_text)})
         try:
             r = requests.post(self.url, headers=self._headers, json={
                 "model": config.CF_BRAIN_MODEL,
@@ -518,17 +615,293 @@ class _CloudflareBrain:
             self._trim()
 
 
+# ── NVIDIA hosted brain ─────────────────────────────────────────────
+
+class _NvidiaSarvamBrain:
+    """NVIDIA OpenAI-compatible brain.
+
+    Default model is z-ai/glm-5.2 via NVIDIA's integrate.api.nvidia.com.
+    """
+    provider_name = "nvidia"
+
+    def __init__(self):
+        self.messages = _initial_messages()
+        self._tools = _openai_tools()
+        self._base_url = config.NVIDIA_BASE_URL.rstrip("/")
+        self._headers = {
+            "Authorization": f"Bearer {config.NVIDIA_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+    def _trim(self, keep: int = 12):
+        if len(self.messages) > keep + 1:
+            self.messages = [self.messages[0]] + self.messages[-keep:]
+
+    def _clean_messages(self):
+        """Sanitize history (same logic as _GroqBrain)."""
+        clean = []
+        for m in self.messages:
+            cm = dict(m)
+            if cm["role"] == "assistant" and "tool_calls" in cm:
+                idx = self.messages.index(m)
+                if idx + 1 < len(self.messages) and self.messages[idx + 1].get("role") == "tool":
+                    clean.append(cm)
+                else:
+                    clean.append({"role": "assistant", "content": cm.get("content") or ""})
+            else:
+                clean.append(cm)
+        return clean
+
+    def _model_for(self, user_text: str) -> str:
+        if (
+            getattr(config, "NVIDIA_INDIAN_LANGUAGE_MODEL", "")
+            and language.is_indian_language(user_text)
+        ):
+            return config.NVIDIA_INDIAN_LANGUAGE_MODEL
+        return config.NVIDIA_BRAIN_MODEL
+
+    def _max_tokens_for(self, user_text: str) -> int:
+        if self._model_for(user_text) == getattr(config, "NVIDIA_INDIAN_LANGUAGE_MODEL", ""):
+            return max(int(config.BRAIN_NUM_PREDICT), 512)
+        return int(config.BRAIN_NUM_PREDICT)
+
+    def ask(self, user_text: str) -> str:
+        self.messages.append({"role": "user", "content": _with_semantic_memory(_final_answer_instruction(user_text))})
+        for _ in range(5):
+            model = self._model_for(user_text)
+            payload = {
+                "model": model,
+                "messages": self._clean_messages(),
+                "tools": self._tools,
+                "tool_choice": "auto",
+                "max_tokens": self._max_tokens_for(user_text),
+                "temperature": 0.5,
+                "top_p": 1,
+            }
+            r = requests.post(
+                f"{self._base_url}/chat/completions",
+                headers=self._headers,
+                json=payload,
+                timeout=config.NVIDIA_BRAIN_TIMEOUT_SECONDS,
+            )
+            if not r.ok:
+                if r.status_code == 429:
+                    raise _GroqRateLimited("NVIDIA rate limit reached")
+                # Tool hallucination fallback — retry without tools
+                if r.status_code == 400 and "tool" in r.text.lower():
+                    print("[brain] nvidia tool error, retrying without tools...")
+                    p2 = dict(payload)
+                    p2.pop("tools", None)
+                    p2.pop("tool_choice", None)
+                    r = requests.post(
+                        f"{self._base_url}/chat/completions",
+                        headers=self._headers,
+                        json=p2,
+                        timeout=config.NVIDIA_BRAIN_TIMEOUT_SECONDS,
+                    )
+                if not r.ok:
+                    print(f"[brain] NVIDIA HTTP {r.status_code}: {r.text[:200]}")
+                    r.raise_for_status()
+            choice = r.json()["choices"][0]
+            msg = choice["message"]
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                self.messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+            else:
+                reply = _clean_provider_reply(msg.get("content") or "")
+                self.messages.append({"role": "assistant", "content": reply})
+                self._trim()
+                return reply
+            for tc in tool_calls:
+                fn = tc["function"]
+                name = fn["name"]
+                try:
+                    args = json.loads(fn["arguments"]) if isinstance(fn["arguments"], str) else (fn["arguments"] or {})
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                result = skills.run_tool(name, args)
+                print(f"[tool] {name}({args}) -> {result}")
+                if name == "play_youtube":
+                    self._trim()
+                    return str(result)
+                self.messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": str(result)})
+        self._trim()
+        return "I got stuck handling that, Sir."
+
+    def ask_stream(self, user_text: str) -> Generator[str, None, None]:
+        """Stream tokens from NVIDIA Sarvam-M (OpenAI-compatible SSE)."""
+        model = self._model_for(user_text)
+        if model == getattr(config, "NVIDIA_INDIAN_LANGUAGE_MODEL", ""):
+            yield self.ask(user_text)
+            return
+
+        self.messages.append({"role": "user", "content": _with_semantic_memory(_final_answer_instruction(user_text))})
+        try:
+            r = requests.post(
+                f"{self._base_url}/chat/completions",
+                headers=self._headers,
+                json={
+                    "model": model,
+                    "messages": self._clean_messages(),
+                    "max_tokens": self._max_tokens_for(user_text),
+                    "temperature": 0.5,
+                    "top_p": 1,
+                    "stream": True,
+                },
+                stream=True,
+                timeout=config.NVIDIA_BRAIN_TIMEOUT_SECONDS,
+            )
+            if not r.ok:
+                if r.status_code == 429:
+                    raise _GroqRateLimited("NVIDIA rate limit reached")
+                raise requests.HTTPError(response=r)
+        except _GroqRateLimited:
+            raise
+        except Exception as e:
+            print(f"[brain] nvidia stream failed: {e}, falling back to non-stream")
+            yield self.ask(user_text)
+            return
+
+        content = ""
+        tool_calls_acc: dict = {}
+        for raw_line in r.iter_lines():
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            for tc in (delta.get("tool_calls") or []):
+                i = tc.get("index", 0)
+                if i not in tool_calls_acc:
+                    tool_calls_acc[i] = {"id": "", "name": "", "arguments": ""}
+                if tc.get("id"):
+                    tool_calls_acc[i]["id"] = tc["id"]
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls_acc[i]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    tool_calls_acc[i]["arguments"] += fn["arguments"]
+            text = delta.get("content") or ""
+            if text and not tool_calls_acc:
+                content += text
+                yield text
+
+        if tool_calls_acc:
+            tool_calls = []
+            for i in sorted(tool_calls_acc.keys()):
+                tc = tool_calls_acc[i]
+                tool_calls.append({
+                    "id": tc["id"] or f"tc_{i}",
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                })
+            self.messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+            for tc in tool_calls:
+                fn = tc["function"]
+                name = fn["name"]
+                try:
+                    args = json.loads(fn["arguments"]) if isinstance(fn["arguments"], str) else (fn["arguments"] or {})
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                result = skills.run_tool(name, args)
+                print(f"[tool] {name}({args}) -> {result}", flush=True)
+                if name == "play_youtube":
+                    self._trim()
+                    yield str(result)
+                    return
+                self.messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": str(result)})
+            try:
+                r2 = requests.post(
+                    f"{self._base_url}/chat/completions",
+                    headers=self._headers,
+                    json={
+                        "model": model,
+                        "messages": self._clean_messages(),
+                        "max_tokens": config.BRAIN_NUM_PREDICT,
+                    },
+                    timeout=config.NVIDIA_BRAIN_TIMEOUT_SECONDS,
+                )
+                r2.raise_for_status()
+                reply = _clean_provider_reply(r2.json()["choices"][0]["message"].get("content", ""))
+                self.messages.append({"role": "assistant", "content": reply})
+                self._trim()
+                yield reply
+            except Exception as e:
+                print(f"[brain] nvidia tool follow-up failed: {e}")
+                yield str(result)
+        else:
+            if content:
+                self.messages.append({"role": "assistant", "content": content})
+            self._trim()
+
+
+class _SarvamAIBrain:
+    """Direct Sarvam AI chat fallback for Indian-language turns."""
+
+    provider_name = "sarvam_ai"
+
+    def __init__(self):
+        self.messages = _initial_messages()
+        self._base_url = config.SARVAM_BASE_URL.rstrip("/")
+        self._headers = {
+            "Authorization": f"Bearer {config.SARVAM_API_KEY}",
+            "api-subscription-key": config.SARVAM_API_KEY,
+            "Content-Type": "application/json",
+        }
+
+    def _trim(self, keep: int = 10):
+        if len(self.messages) > keep + 1:
+            self.messages = [self.messages[0]] + self.messages[-keep:]
+
+    def ask(self, user_text: str) -> str:
+        if not language.is_indian_language(user_text):
+            raise RuntimeError("Sarvam AI fallback is reserved for Indian-language turns")
+        self.messages.append({"role": "user", "content": _with_semantic_memory(_final_answer_instruction(user_text))})
+        payload = {
+            "model": config.SARVAM_CHAT_MODEL,
+            "messages": self.messages,
+            "max_tokens": max(int(config.BRAIN_NUM_PREDICT), 512),
+            "temperature": 0.2,
+        }
+        r = requests.post(
+            f"{self._base_url}/chat/completions",
+            headers=self._headers,
+            json=payload,
+            timeout=config.SARVAM_TIMEOUT_SECONDS,
+        )
+        if not r.ok:
+            print(f"[brain] Sarvam AI HTTP {r.status_code}: {r.text[:200]}")
+            r.raise_for_status()
+        msg = r.json()["choices"][0]["message"]
+        reply = _clean_provider_reply(msg.get("content") or "")
+        self.messages.append({"role": "assistant", "content": reply})
+        self._trim()
+        return reply
+
+    def ask_stream(self, user_text: str) -> Generator[str, None, None]:
+        yield self.ask(user_text)
+
+
 class _LocalBrain:
     def __init__(self):
         self.client = ollama.Client(host=config.OLLAMA_HOST)
-        self.messages = [{"role": "system", "content": _system_prompt()}]
+        self.messages = _initial_messages()
 
     def _trim(self, keep: int = 20):
         if len(self.messages) > keep + 1:
             self.messages = [self.messages[0]] + self.messages[-keep:]
 
     def ask(self, user_text: str) -> str:
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "user", "content": _with_semantic_memory(user_text)})
         for _ in range(5):
             resp = self.client.chat(
                 model=config.BRAIN_MODEL,
@@ -578,6 +951,8 @@ class Brain:
     def __init__(self):
         engine = config.BRAIN_ENGINE
         self._cloudflare = _CloudflareBrain() if _cf_available() else None
+        self._nvidia = _NvidiaSarvamBrain() if getattr(config, "NVIDIA_BRAIN_ENABLED", False) else None
+        self._sarvam_ai = _SarvamAIBrain() if getattr(config, "SARVAM_AI_ENABLED", False) else None
         self._groq = _GroqBrain() if config.GROQ_API_KEY else None
         self._openai = _OpenAIBrain() if config.OPENAI_API_KEY else None
         # keep a local brain unless explicitly groq-only with cloud available
@@ -591,7 +966,7 @@ class Brain:
         cb_half = getattr(config, "CB_HALF_OPEN_SECONDS", 30)
         self._breakers: dict[str, "CircuitBreaker"] = {}
         self._cooldowns: dict[str, float] = {}  # legacy compat
-        for pname in ("cloudflare", "groq", "openai"):
+        for pname in ("cloudflare", "nvidia", "sarvam_ai", "groq", "openai"):
             self._breakers[pname] = CircuitBreaker(
                 name=pname, failure_threshold=cb_fail,
                 open_seconds=cb_open, half_open_seconds=cb_half,
@@ -600,14 +975,33 @@ class Brain:
         self.last_latency_ms = 0.0
 
         names = []
-        if self._cloudflare: names.append("Cloudflare")
-        if self._groq: names.append("Groq")
-        if self._openai: names.append("OpenAI")
-        if self._local: names.append("local Ollama")
+        for provider in self._chain():
+            pname = self._provider_name(provider)
+            if pname == "nvidia":
+                indian = getattr(config, "NVIDIA_INDIAN_LANGUAGE_MODEL", "")
+                if indian:
+                    names.append(f"NVIDIA {config.NVIDIA_BRAIN_MODEL} / Indian {indian}")
+                else:
+                    names.append(f"NVIDIA {config.NVIDIA_BRAIN_MODEL}")
+            elif pname == "sarvam_ai":
+                names.append(f"Sarvam AI {config.SARVAM_CHAT_MODEL}")
+            elif pname == "cloudflare":
+                names.append("Cloudflare")
+            elif pname == "groq":
+                names.append("Groq")
+            elif pname == "openai":
+                names.append("OpenAI")
+            else:
+                names.append("local Ollama")
+        if self._sarvam_ai and not any(name.startswith("Sarvam AI") for name in names):
+            names.insert(1 if names else 0, f"Sarvam AI {config.SARVAM_CHAT_MODEL} (Indian fallback)")
         print(f"[brain] chain: {' -> '.join(names) or 'none'}")
 
         if self._cloudflare:
             self._start_keepwarm()
+        if self._groq:
+            import threading
+            threading.Thread(target=self._groq.warmup, daemon=True).start()
 
     def _start_keepwarm(self):
         import threading
@@ -617,9 +1011,27 @@ class Brain:
                 time.sleep(120)  # every 2 min keeps the 70B model loaded
         threading.Thread(target=loop, daemon=True).start()
 
-    def _chain(self):
-        return [b for b in (getattr(self, "_cloudflare", None), getattr(self, "_groq", None),
-                            getattr(self, "_openai", None), getattr(self, "_local", None)) if b]
+    def _chain(self, user_text: str = ""):
+        sarvam_direct = getattr(self, "_sarvam_ai", None) if language.is_indian_language(user_text or "") else None
+        if getattr(config, "NVIDIA_BRAIN_PRIORITY", True):
+            order = (
+                getattr(self, "_nvidia", None),
+                sarvam_direct,
+                getattr(self, "_cloudflare", None),
+                getattr(self, "_groq", None),
+                getattr(self, "_openai", None),
+                getattr(self, "_local", None),
+            )
+        else:
+            order = (
+                getattr(self, "_cloudflare", None),
+                getattr(self, "_nvidia", None),
+                sarvam_direct,
+                getattr(self, "_groq", None),
+                getattr(self, "_openai", None),
+                getattr(self, "_local", None),
+            )
+        return [b for b in order if b]
 
     @staticmethod
     def _provider_name(brain) -> str:
@@ -632,6 +1044,8 @@ class Brain:
             return "groq"
         if isinstance(brain, _OpenAIBrain):
             return "openai"
+        if isinstance(brain, _SarvamAIBrain):
+            return "sarvam_ai"
         return "ollama"
 
     def _ready(self, brain) -> bool:
@@ -686,13 +1100,14 @@ class Brain:
             print(f"[brain] {name} unavailable ({error}); cooling down for {config.PROVIDER_COOLDOWN_SECONDS}s.", flush=True)
 
     def ask(self, user_text: str) -> str:
-        for b in self._chain():
+        for b in self._chain(user_text):
             if not self._ready(b):
                 continue
             started = time.perf_counter()
             try:
                 reply = b.ask(user_text)
                 self._success(b, started)
+                conversation_store.save_turn(user_text, reply)
                 return reply
             except _GroqRateLimited as e:
                 self._failure(b, e)
@@ -704,17 +1119,21 @@ class Brain:
         return "All my brains are unreachable right now, Sir."
 
     def ask_stream(self, user_text: str) -> Generator[str, None, None]:
-        """Stream tokens when the primary tier supports it (Groq); otherwise yield
-        the full reply from the first tier that answers."""
-        chain = self._chain()
-        for b in chain:
+        """Stream tokens from the first available provider that supports it.
+
+        Cloudflare and Groq both expose ``ask_stream``. Older code only used
+        Groq streaming, which made a configured Cloudflare primary brain wait
+        for the full reply before speech could begin.
+        """
+        for b in self._chain(user_text):
             if not self._ready(b):
                 continue
             started = time.perf_counter()
             try:
-                if isinstance(b, _GroqBrain):
+                streamer = getattr(b, "ask_stream", None)
+                if callable(streamer):
                     first_token = True
-                    for token in b.ask_stream(user_text):
+                    for token in streamer(user_text):
                         if first_token:
                             runtime.timing("brain_first_token", (time.perf_counter() - started) * 1000)
                             first_token = False

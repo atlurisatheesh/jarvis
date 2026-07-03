@@ -84,15 +84,22 @@ class Ears:
     def _groq(self, path: str) -> str:
         import requests
         try:
+            data = {
+                "model": config.GROQ_STT_MODEL,
+                "prompt": (
+                    "Leha. Indian multilingual assistant. Hindi, Telugu, Tamil, "
+                    "Kannada, Malayalam, Marathi, Gujarati, Bengali, Hinglish, English."
+                ),
+                "response_format": "text",
+            }
+            if config.WHISPER_LANG:
+                data["language"] = config.WHISPER_LANG
             with open(path, "rb") as f:
                 r = requests.post(
                     _GROQ_URL,
                     headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"},
                     files={"file": (os.path.basename(path), f, "application/octet-stream")},
-                    data={"model": config.GROQ_STT_MODEL,
-                          "language": config.WHISPER_LANG or "en",
-                          "prompt": "Leha, open Chrome. Leha, play music. Leha, what time is it? Leha, tell me a joke. Yes sir, Leha.",
-                          "response_format": "text"},
+                    data=data,
                     timeout=config.STT_REQUEST_TIMEOUT_SECONDS,
                 )
             return r.text.strip() if r.ok else ""
@@ -103,16 +110,18 @@ class Ears:
     def _openai(self, path: str) -> str:
         import requests
         try:
+            data = {
+                "model": config.OPENAI_STT_MODEL,
+                "response_format": "json",
+            }
+            if config.WHISPER_LANG:
+                data["language"] = config.WHISPER_LANG
             with open(path, "rb") as f:
                 r = requests.post(
                     _OPENAI_URL,
                     headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}"},
                     files={"file": (os.path.basename(path), f, "audio/wav")},
-                    data={
-                        "model": config.OPENAI_STT_MODEL,
-                        "language": config.WHISPER_LANG or "en",
-                        "response_format": "json",
-                    },
+                    data=data,
                     timeout=config.STT_REQUEST_TIMEOUT_SECONDS,
                 )
             if not r.ok:

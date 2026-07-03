@@ -27,9 +27,15 @@ def _make_wav(path: Path, n_samples: int = 16000, freq: float = 440.0, rate: int
 # ---------------------------------------------------------------------------
 
 class TestStrictMode(unittest.TestCase):
-    def test_strict_mode_false_by_default(self):
+    def test_strict_mode_tracks_custom_wake_default(self):
         from jarvis_ai import wake_phrases
-        self.assertFalse(wake_phrases.strict_mode())
+        from jarvis_ai import config
+        self.assertEqual(wake_phrases.strict_mode(), bool(config.CUSTOM_WAKE_ENABLED))
+
+    def test_strict_mode_false_when_custom_disabled(self):
+        from jarvis_ai import wake_phrases
+        with patch("jarvis_ai.config.CUSTOM_WAKE_ENABLED", False):
+            self.assertFalse(wake_phrases.strict_mode())
 
     def test_strict_mode_true_when_custom_enabled(self):
         from jarvis_ai import wake_phrases

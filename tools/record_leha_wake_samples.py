@@ -30,6 +30,8 @@ from jarvis_ai.audio import _capture_rates, resolve_device, stream_utterances
 
 SAMPLE_RATE = 16_000
 PHRASES = ("Leha", "Hey Leha", "Leha listen")
+DEFAULT_MIN_RMS = 0.005
+DEFAULT_MIN_PEAK = 0.03
 
 
 def write_wav(path: Path, audio: np.ndarray) -> None:
@@ -38,6 +40,13 @@ def write_wav(path: Path, audio: np.ndarray) -> None:
         out.setsampwidth(2)
         out.setframerate(SAMPLE_RATE)
         out.writeframes(audio.astype(np.int16).tobytes())
+
+
+def _quality(audio: np.ndarray) -> tuple[float, float]:
+    scaled = audio.astype(np.float32) / 32768.0
+    rms = float(np.sqrt(np.mean(scaled ** 2))) if len(scaled) else 0.0
+    peak = float(np.max(np.abs(scaled))) if len(scaled) else 0.0
+    return rms, peak
 
 
 def main() -> None:
@@ -50,6 +59,8 @@ def main() -> None:
         help="record on a timed countdown instead of waiting for Enter each clip",
     )
     parser.add_argument("--gap", type=float, default=1.5, help="pause between automatic clips")
+    parser.add_argument("--min-rms", type=float, default=DEFAULT_MIN_RMS)
+    parser.add_argument("--min-peak", type=float, default=DEFAULT_MIN_PEAK)
     parser.add_argument(
         "--continuous",
         action="store_true",
@@ -86,14 +97,23 @@ def main() -> None:
         print("Continuous mode starts in 5 seconds. Say 'Leha', wait one second, and repeat.")
         time.sleep(5)
         saved = 0
+        attempts = 0
         for clip in stream_utterances(
             silence_ms=650, start_rms=150, max_seconds=4, min_samples=4_000
         ):
-            rms = float(np.sqrt(np.mean(clip.astype(np.float32) ** 2)))
+            attempts += 1
+            rms, peak = _quality(clip)
+            if rms < args.min_rms or peak < args.min_peak:
+                print(
+                    f"Rejected quiet clip (RMS {rms:.4f}, peak {peak:.4f}). "
+                    "Move closer or speak clearer.",
+                    flush=True,
+                )
+                continue
             path = output / f"leha_{saved + 1:03d}.wav"
             write_wav(path, clip)
             saved += 1
-            print(f"Saved {path.name} (RMS {rms:.0f})", flush=True)
+            print(f"Saved {path.name} (RMS {rms:.4f}, peak {peak:.4f})", flush=True)
             if saved >= args.count:
                 break
         print("Done. Keep the clips private. Next step: train/export leha.onnx, then set")
@@ -104,12 +124,16 @@ def main() -> None:
         time.sleep(8)
 
     frames = int(native_rate * args.seconds)
-    for index in range(args.count):
-        phrase = PHRASES[index % len(PHRASES)]
+    saved = 0
+    attempts = 0
+    max_attempts = args.count * 4
+    while saved < args.count and attempts < max_attempts:
+        attempts += 1
+        phrase = PHRASES[saved % len(PHRASES)]
         if not args.auto:
-            input(f"[{index + 1:02d}/{args.count:02d}] Press Enter, then say: {phrase!r} ")
+            input(f"[{saved + 1:02d}/{args.count:02d}] Press Enter, then say: {phrase!r} ")
         else:
-            print(f"[{index + 1:02d}/{args.count:02d}] Next phrase: {phrase!r}")
+            print(f"[{saved + 1:02d}/{args.count:02d}] Next phrase: {phrase!r}")
         for number in (3, 2, 1):
             print(number, flush=True)
             time.sleep(0.6)
@@ -129,12 +153,23 @@ def main() -> None:
             clip = resample_poly(
                 clip.astype(np.float32), SAMPLE_RATE // divisor, native_rate // divisor
             ).astype(np.int16)
-        rms = float(np.sqrt(np.mean(clip.astype(np.float32) ** 2)))
-        path = output / f"leha_{index + 1:03d}.wav"
+        rms, peak = _quality(clip)
+        if rms < args.min_rms or peak < args.min_peak:
+            print(
+                f"Rejected quiet clip (RMS {rms:.4f}, peak {peak:.4f}). "
+                "Try again closer to the mic."
+            )
+            if args.auto:
+                time.sleep(args.gap)
+            continue
+        path = output / f"leha_{saved + 1:03d}.wav"
         write_wav(path, clip)
-        print(f"Saved {path.name} (RMS {rms:.0f})")
-        if args.auto and index + 1 < args.count:
+        saved += 1
+        print(f"Saved {path.name} (RMS {rms:.4f}, peak {peak:.4f})")
+        if args.auto and saved < args.count:
             time.sleep(args.gap)
+    if saved < args.count:
+        raise SystemExit(f"Only saved {saved}/{args.count} valid clips after {attempts} attempts.")
 
     print("Done. Keep the clips private. Next step: train/export leha.onnx, then set")
     print("OWW_MODEL_PATH to that file and OWW_ENABLED = True in jarvis_ai/config.py.")

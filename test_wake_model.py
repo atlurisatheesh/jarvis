@@ -119,6 +119,22 @@ class TestWakeEvaluator(unittest.TestCase):
 class TestWakeLocalOnnx(unittest.TestCase):
     """Tests for wake_local_onnx wake detection logic."""
 
+    def test_unapproved_model_is_not_available(self):
+        from jarvis_ai import wake_local_onnx
+        with tempfile.NamedTemporaryFile(suffix=".onnx") as model, \
+             tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as report:
+            report.write('{"approved": false}')
+            report_path = report.name
+        try:
+            with patch("jarvis_ai.wake_local_onnx.config.CUSTOM_WAKE_ENABLED", True), \
+                 patch("jarvis_ai.wake_local_onnx.config.CUSTOM_WAKE_MODEL_PATH", model.name), \
+                 patch("jarvis_ai.wake_local_onnx.config.CUSTOM_WAKE_REQUIRE_APPROVAL", True), \
+                 patch("jarvis_ai.wake_local_onnx.config.CUSTOM_WAKE_FORCE_UNAPPROVED", False), \
+                 patch("jarvis_ai.wake_local_onnx.config.CUSTOM_WAKE_EVAL_REPORT", report_path):
+                self.assertFalse(wake_local_onnx.is_available())
+        finally:
+            Path(report_path).unlink(missing_ok=True)
+
     def test_two_hit_requirement(self):
         """Wake should require 2 consecutive hits above threshold."""
         # Simulate the 2-hit logic
@@ -156,6 +172,138 @@ class TestWakeLocalOnnx(unittest.TestCase):
                 consecutive = 0
 
         self.assertFalse(triggered)
+
+    def test_wake_validation_status_uses_actual_availability(self):
+        from jarvis_ai import pro_ops
+
+        with patch("jarvis_ai.wake_local_onnx.is_available", return_value=False), \
+             patch("jarvis_ai.pro_ops.config.CUSTOM_WAKE_ENABLED", True):
+            status = pro_ops.wake_validation_status()
+
+        self.assertEqual(status["engine"], "strict_transcript")
+        self.assertFalse(status["available"])
+
+
+class TestWakePhraseFallback(unittest.TestCase):
+    """Observed STT wake-word variants should still activate Leha."""
+
+    def test_observed_lehav_variant_triggers_in_strict_mode(self):
+        from jarvis_ai.wake_phrases import has_trigger
+
+        self.assertTrue(has_trigger("Lehav"))
+
+    def test_observed_lehon_variant_triggers_in_strict_mode(self):
+        from jarvis_ai.wake_phrases import has_trigger, strip_trigger
+
+        self.assertTrue(has_trigger("Lehon"))
+        self.assertEqual(strip_trigger("Lehon"), "")
+        self.assertEqual(strip_trigger("Lehon open maps"), "open maps")
+
+    def test_weak_lehra_variant_does_not_trigger_in_strict_mode(self):
+        from jarvis_ai.wake_phrases import has_trigger
+
+        self.assertFalse(has_trigger("Lehra"))
+
+    def test_common_false_wake_words_do_not_trigger_in_strict_mode(self):
+        from jarvis_ai.wake_phrases import has_trigger
+
+        for phrase in ("layer", "later", "lear", "lair", "lehr", "yeah"):
+            self.assertFalse(has_trigger(phrase), phrase)
+
+    def test_observed_leja_variant_triggers(self):
+        from jarvis_ai.wake_phrases import has_trigger, strip_trigger
+
+        self.assertTrue(has_trigger("Leja, where am I?"))
+        self.assertEqual(strip_trigger("Leja, where am I?"), "where am i")
+
+    def test_observed_lleha_variant_triggers(self):
+        from jarvis_ai.wake_phrases import has_trigger, strip_trigger
+
+        self.assertTrue(has_trigger("Lleha, play music."))
+        self.assertEqual(strip_trigger("Lleha, play music."), "play music")
+
+    def test_observed_leia_variant_triggers(self):
+        from jarvis_ai.wake_phrases import has_trigger, strip_trigger
+
+        self.assertTrue(has_trigger("Leia?"))
+        self.assertEqual(strip_trigger("Leia?"), "")
+
+    def test_indic_script_wake_variants_trigger(self):
+        from jarvis_ai.wake_phrases import has_trigger, strip_trigger
+
+        cases = {
+            "लेखा": "",
+            "लेखा समय बताओ": "समय बताओ",
+            "లేహా సమయం చెప్పు": "సమయం చెప్పు",
+            "லேஹா நேரம் சொல்லு": "நேரம் சொல்லு",
+        }
+        for phrase, stripped in cases.items():
+            self.assertTrue(has_trigger(phrase), phrase)
+            self.assertEqual(strip_trigger(phrase), stripped)
+
+    def test_clean_bare_wake_speaks_ack(self):
+        from jarvis_ai.assistant_session import AssistantSession
+
+        session = AssistantSession()
+        result = session.handle("Leha", lambda _: "brain should not run")
+        self.assertTrue(result.acted)
+        self.assertEqual(result.reply, "Yes, Sir?")
+
+    def test_observed_bare_wake_variant_speaks_ack(self):
+        from jarvis_ai.assistant_session import AssistantSession
+
+        session = AssistantSession()
+        result = session.handle("Lehav", lambda _: "brain should not run")
+        self.assertTrue(result.acted)
+        self.assertEqual(result.reply, "Yes, Sir?")
+
+    def test_bare_wake_opens_followup_window(self):
+        from jarvis_ai.assistant_session import AssistantSession
+
+        session = AssistantSession(followup_seconds=0)
+        first = session.handle("Leha", lambda _: "brain should not run")
+        second = session.handle("what can you do", lambda q: f"brain:{q}")
+
+        self.assertEqual(first.reply, "Yes, Sir?")
+        self.assertTrue(second.acted)
+        self.assertTrue(second.reply)
+        self.assertEqual(second.ignored_reason, "")
+
+    def test_active_window_ignores_noise(self):
+        from jarvis_ai.assistant_session import AssistantSession
+
+        session = AssistantSession(followup_seconds=0)
+        first = session.handle("Leha", lambda _: "brain should not run")
+        second = session.handle("Hi", lambda _: "brain should not run")
+
+        self.assertEqual(first.reply, "Yes, Sir?")
+        self.assertFalse(second.acted)
+        self.assertEqual(second.ignored_reason, "hallucination")
+
+    def test_active_window_ignores_go_ahead_mike_noise(self):
+        from jarvis_ai.assistant_session import AssistantSession
+
+        session = AssistantSession(followup_seconds=0)
+        first = session.handle("Leha", lambda _: "brain should not run")
+        second = session.handle("Go ahead, Mike.", lambda _: "brain should not run")
+
+        self.assertEqual(first.reply, "Yes, Sir?")
+        self.assertFalse(second.acted)
+        self.assertEqual(second.ignored_reason, "hallucination")
+
+    def test_active_window_does_not_send_unclear_text_to_brain(self):
+        from jarvis_ai.assistant_session import AssistantSession
+
+        def fail_brain(_):
+            raise AssertionError("brain should not run for unclear follow-up")
+
+        session = AssistantSession(followup_seconds=0)
+        first = session.handle("Leha", fail_brain)
+        second = session.handle("some unclear random words", fail_brain)
+
+        self.assertEqual(first.reply, "Yes, Sir?")
+        self.assertFalse(second.acted)
+        self.assertEqual(second.ignored_reason, "followup_requires_wake")
 
 
 if __name__ == "__main__":

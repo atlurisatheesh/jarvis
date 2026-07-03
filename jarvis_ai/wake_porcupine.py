@@ -86,10 +86,12 @@ class PorcupineListener:
     def stream_utterances(
         self,
         should_mute=None,
+        barge_in_active=None,
         silence_ms: int = 900,
         max_seconds: float = 12.0,
         min_samples: int = 6000,
         start_rms: float = 180.0,
+        session_active=None,
     ):
         """Generator — keep calling next() until KeyboardInterrupt.
 
@@ -214,7 +216,6 @@ class PorcupineListener:
                             frames_buf = []
                             started = False
                             silent_count = 0
-                            woken = False
 
                             # Resample + gentle normalize for Whisper
                             if native != 16000:
@@ -226,3 +227,10 @@ class PorcupineListener:
 
                             if len(audio) >= min_samples:
                                 yield audio
+                            # After yielding: stay in command-capture mode if
+                            # the session follow-up window is still open.
+                            if session_active and session_active():
+                                wait_count = 0
+                                # Stay woken — ready for the next follow-up utterance
+                            else:
+                                woken = False
