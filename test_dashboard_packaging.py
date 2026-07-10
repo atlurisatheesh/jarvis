@@ -19,7 +19,8 @@ class TestProSettings(unittest.TestCase):
             })
             loaded = pro_settings.load()
         self.assertEqual(saved["custom_wake_threshold"], 0.9999)
-        self.assertTrue(loaded["barge_in_enabled"])
+        self.assertFalse(loaded["barge_in_enabled"])
+        self.assertIn("requires validated AEC", loaded["barge_in_note"])
         self.assertEqual(loaded["proactive_max_spoken_per_hour"], 60)
 
     def test_apply_to_config_updates_current_process(self):
@@ -60,9 +61,10 @@ class TestDashboardAssets(unittest.TestCase):
             for word in forbidden:
                 self.assertNotIn(word, text, str(path))
 
-    def test_wake_ack_is_silent_by_default(self):
+    def test_wake_ack_is_enabled_for_cached_clone_response(self):
         from jarvis_ai import config
-        self.assertFalse(config.SPEAK_WAKE_ACK)
+        self.assertTrue(config.SPEAK_WAKE_ACK)
+        self.assertIn("yes sir", config.ELEVENLABS_CACHE_PHRASES)
 
 
 if __name__ == "__main__":

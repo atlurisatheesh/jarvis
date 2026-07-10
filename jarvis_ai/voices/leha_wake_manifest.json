@@ -1,0 +1,24 @@
+{
+  "model": "leha.onnx",
+  "source": "kaggle_wake_job/final_outputs_v16/leha.onnx",
+  "sha256": "FE4E1F40A03FF51D6C8676312E54F0C66236C0993DAAC433760C34D29477067E",
+  "threshold": 0.5,
+  "required_hits": 2,
+  "held_out": {
+    "positive_clips": 65,
+    "negative_clips": 280,
+    "recall": 0.8,
+    "false_wakes": 0,
+    "false_wake_rate": 0.0
+  },
+  "approved": false,
+  "validation_label": "hybrid candidate; neural misses use strict transcript fallback",
+  "live_spot_check": {
+    "date": "2026-07-10",
+    "recorded_owner_clips": 5,
+    "neural_two_hit_wakes": 1,
+    "hybrid_total_wakes": 3,
+    "note": "Small diagnostic sample only; confirms the model is not room-approved."
+  },
+  "deployed_at": "2026-07-10"
+}

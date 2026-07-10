@@ -31,6 +31,7 @@ POSITIVE_DIRS = [
     ROOT / "jarvis_ai" / "voices" / "wake_leha",
     ROOT / "jarvis_ai" / "voices" / "wake_leha_continuous",
     ROOT / "jarvis_ai" / "voices" / "wake_leha_retry",
+    ROOT / "jarvis_ai" / "voices" / "wake_leha_guided",
 ]
 
 LOCAL_NEGATIVE_SOURCES = [
@@ -111,6 +112,22 @@ def _window(audio: np.ndarray, start: int | None = None) -> np.ndarray:
     return audio[start : start + WINDOW].astype(np.float32)
 
 
+def _speech_window(audio: np.ndarray) -> np.ndarray:
+    """Pick the highest-energy 1s window so wake speech is not cropped away."""
+    if len(audio) <= WINDOW:
+        return _window(audio)
+    hop = RATE // 20
+    best_start = 0
+    best_rms = -1.0
+    for start in range(0, len(audio) - WINDOW + 1, hop):
+        sample = audio[start : start + WINDOW]
+        rms = float(np.sqrt(np.mean(sample * sample)))
+        if rms > best_rms:
+            best_rms = rms
+            best_start = start
+    return _window(audio, best_start)
+
+
 def _write(path: Path, audio: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(path), np.clip(audio, -1.0, 1.0), RATE, subtype="PCM_16")
@@ -120,6 +137,10 @@ def _copy_positive_splits(out: Path, heldout_ratio: float, min_positive_rms: flo
     files: list[Path] = []
     for directory in POSITIVE_DIRS:
         files.extend(sorted(directory.glob("*.wav")))
+    guided_parent = ROOT / "jarvis_ai" / "voices"
+    for directory in sorted(guided_parent.glob("wake_leha_guided_*")):
+        if directory.is_dir():
+            files.extend(sorted(directory.glob("*.wav")))
     files = sorted(set(files))
     usable: list[tuple[Path, np.ndarray]] = []
     rejected = 0
@@ -128,7 +149,7 @@ def _copy_positive_splits(out: Path, heldout_ratio: float, min_positive_rms: flo
         if audio is None:
             rejected += 1
             continue
-        clipped = _window(audio)
+        clipped = _speech_window(audio)
         rms = float(np.sqrt(np.mean(clipped * clipped)))
         if rms < min_positive_rms:
             rejected += 1

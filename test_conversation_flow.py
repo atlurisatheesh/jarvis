@@ -71,7 +71,7 @@ class TestFollowUpWindow(unittest.TestCase):
 
     def test_followup_command_runs_without_trigger(self):
         """Inside the follow-up window, a command runs without re-waking."""
-        s = AssistantSession()
+        s = AssistantSession(followup_seconds=25)
         s.activate()  # open the window
         with patch("jarvis_ai.config.REQUIRE_TRIGGER", True), \
              patch("jarvis_ai.config.WAKE_FREE_MEDIA_CONTROLS", True):

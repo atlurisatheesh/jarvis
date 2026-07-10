@@ -66,6 +66,7 @@ except Exception:
 # Telegram, phone app) are "remote" and must NOT be able to run a shell or
 # destructive/outbound actions even if the brain tries to call them.
 _origin = contextvars.ContextVar("leha_origin", default="local")
+_confirmed = contextvars.ContextVar("leha_confirmed_tool", default=False)
 
 # Tools refused for remote callers (shell, power, outbound cost/contact, net).
 REMOTE_BLOCKED_TOOLS = {
@@ -84,6 +85,15 @@ def set_origin(origin: str):
 
 def get_origin() -> str:
     return _origin.get()
+
+
+def run_confirmed_tool(name: str, args: dict) -> str:
+    """Run a confirmation-required tool after the local voice gate approved it."""
+    token = _confirmed.set(True)
+    try:
+        return run_tool(name, args)
+    finally:
+        _confirmed.reset(token)
 
 
 # Read-only skills whose output can be safely cached (Phase 2).
@@ -110,6 +120,11 @@ def run_tool(name: str, args: dict) -> str:
         from .. import audit_log
         audit_log.log_tool(name, args, origin, None, error=policy.reason)
         return policy.reason
+    if policy.needs_confirmation and not _confirmed.get():
+        reason = f"Confirmation required before running '{name}', Sir."
+        from .. import audit_log
+        audit_log.log_tool(name, args, origin, None, error=reason)
+        return reason
 
     # Phase 4: audit logging before execution.
     from .. import audit_log

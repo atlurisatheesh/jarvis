@@ -36,6 +36,37 @@ _KEYWORD_PROFILES = {
 
 DEFAULT_PROFILE = LanguageProfile("en-IN", "Indian English", "en-IN-NeerjaNeural")
 
+_ROMANIZED_PROFILES: list[tuple[set[str], LanguageProfile]] = [
+    ({
+        "nenu", "nannu", "naku", "naaku", "nuvvu", "meeru", "meeku",
+        "enti", "emiti", "ante", "antey", "cheppu", "cheppandi",
+        "ela", "ekkada", "ikkada", "ledu", "undi", "kavali", "kaavali",
+        "bagundi", "baagundi", "chala", "chaala", "telugu", "ra", "raa",
+        "amma", "nanna", "anna", "akka", "tammudu", "chelli",
+    }, _KEYWORD_PROFILES["telugu"]),
+    ({
+        "hai", "kya", "kyun", "kaise", "kaisa", "kaisi", "mujhe", "mujhko",
+        "tum", "aap", "mera", "meri", "mere", "nahi", "nahin", "haan",
+        "achha", "accha", "batao", "bolo", "hindi",
+    }, _KEYWORD_PROFILES["hindi"]),
+    ({
+        "enna", "epdi", "eppadi", "enga", "inge", "illa", "irukku",
+        "venum", "sollu", "sollunga", "romba", "tamil",
+    }, _KEYWORD_PROFILES["tamil"]),
+    ({
+        "enu", "yenu", "hege", "elli", "illa", "ide", "beku",
+        "helu", "kannada",
+    }, _KEYWORD_PROFILES["kannada"]),
+]
+
+
+def _words(text: str) -> set[str]:
+    return {
+        token.strip(".,!?;:'\"()[]{}").lower()
+        for token in (text or "").split()
+        if token.strip(".,!?;:'\"()[]{}")
+    }
+
 
 def detect_language(text: str) -> LanguageProfile:
     """Best-effort local language detection.
@@ -52,11 +83,27 @@ def detect_language(text: str) -> LanguageProfile:
         for start, end, code, name, voice in _SCRIPT_RANGES:
             if start <= ch <= end:
                 return LanguageProfile(code, name, voice)
+    words = _words(raw)
+    for keywords, profile in _ROMANIZED_PROFILES:
+        if len(words & keywords) >= 1:
+            return profile
     return DEFAULT_PROFILE
 
 
 def is_indian_language(text: str) -> bool:
     return detect_language(text).code != "en-IN"
+
+
+def is_romanized_indian_language(text: str) -> bool:
+    raw = text or ""
+    profile = detect_language(raw)
+    if profile.code == "en-IN":
+        return False
+    for ch in raw:
+        for start, end, *_ in _SCRIPT_RANGES:
+            if start <= ch <= end:
+                return False
+    return True
 
 
 def edge_voice_for_text(text: str) -> str:
@@ -69,5 +116,8 @@ def prompt_language_rule() -> str:
         "Kannada, Malayalam, Marathi, Gujarati, Bengali, and mixed Indian "
         "speech. Reply in the same language/script the user used. If the user "
         "mixes English with an Indian language, reply naturally in that mixed "
-        "style. Keep voice answers short."
+        "style. If the user speaks an Indian language using English letters "
+        "(for example romanized Telugu like 'nannu antey'), answer in that "
+        "language's native script for clearer speech unless they explicitly ask "
+        "for English letters. Keep voice answers short."
     )

@@ -52,6 +52,33 @@ class TestSkillPolicy(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertTrue(decision.needs_confirmation)
 
+    def test_run_tool_enforces_confirmation_required_policy(self):
+        from jarvis_ai import skills
+
+        result = skills.run_tool("shutdown_pc", {})
+        self.assertIn("Confirmation required", result)
+
+    def test_run_confirmed_tool_bypasses_confirmation_gate(self):
+        from jarvis_ai import skills
+
+        with patch("jarvis_ai.skills.windows.shutdown_pc", return_value="confirmed") as mocked:
+            skills.DISPATCH["shutdown_pc"] = mocked
+            try:
+                result = skills.run_confirmed_tool("shutdown_pc", {})
+            finally:
+                from jarvis_ai.skills import windows
+                skills.DISPATCH["shutdown_pc"] = windows.shutdown_pc
+        self.assertEqual(result, "confirmed")
+        mocked.assert_called_once()
+
+    def test_wifi_command_reaches_confirmation_prompt(self):
+        from jarvis_ai.assistant_core import handle_local_intent
+
+        result = handle_local_intent("turn off wifi")
+        self.assertTrue(result.handled)
+        self.assertIn("Wi-Fi", result.reply)
+        self.assertIn("yes or no", result.reply)
+
     def test_all_policies_returns_dict(self):
         from jarvis_ai.skill_policy import all_policies
         policies = all_policies()

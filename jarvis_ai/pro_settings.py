@@ -48,6 +48,9 @@ def _coerce(data: dict) -> dict:
             value = str(data[key]).strip()
             if len(value) == 5 and value[2] == ":":
                 out[key] = value
+    note = str(data.get("barge_in_note", "")).strip()
+    if note:
+        out["barge_in_note"] = note[:240]
     return out
 
 
@@ -65,6 +68,11 @@ def save(updates: dict) -> dict:
         current = load()
         current.update(updates or {})
         data = _coerce(current)
+        if data.get("barge_in_enabled") and not (
+            data.get("aec_enabled") or getattr(config, "AEC_HARDWARE_DEVICE", None)
+        ):
+            data["barge_in_enabled"] = False
+            data["barge_in_note"] = "Barge-in requires validated AEC or a hardware AEC microphone."
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         _PATH.parent.mkdir(parents=True, exist_ok=True)
         _PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")

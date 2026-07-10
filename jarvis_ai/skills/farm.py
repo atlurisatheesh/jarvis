@@ -70,6 +70,112 @@ def get_weather() -> str:
         return f"Weather unavailable: {e}"
 
 
+def current_location() -> str:
+    """Approximate current location from the internet connection (city-level)."""
+    import requests
+    try:
+        d = requests.get("https://ipapi.co/json/", timeout=8).json()
+        if d.get("city"):
+            return (f"You are near {d['city']}, {d.get('region', '')}, "
+                    f"{d.get('country_name', '')}, based on the internet connection.")
+    except Exception:
+        pass
+    try:
+        d = requests.get("http://ip-api.com/json/", timeout=8).json()
+        if d.get("status") == "success":
+            return (f"You are near {d['city']}, {d.get('regionName', '')}, "
+                    f"{d.get('country', '')}, based on the internet connection.")
+    except Exception as e:
+        return f"Location unavailable right now: {e}"
+    return "Location unavailable right now, Sir."
+
+
+# Cities the geocoder only knows by their official/renamed spelling.
+_CITY_ALIASES = {
+    "bangalore": "Bengaluru",
+    "bombay": "Mumbai",
+    "madras": "Chennai",
+    "calcutta": "Kolkata",
+    "pondicherry": "Puducherry",
+    "trivandrum": "Thiruvananthapuram",
+    "vizag": "Visakhapatnam",
+    "mysore": "Mysuru",
+    "mangalore": "Mangaluru",
+    "belgaum": "Belagavi",
+    "gurgaon": "Gurugram",
+}
+
+
+def _geocode_once(name: str):
+    import requests
+    d = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": name, "count": 10, "language": "en"},
+        timeout=8,
+    ).json()
+    return d.get("results") or []
+
+
+def _geocode(place: str):
+    """Free geocoding via open-meteo (no API key). Returns (lat, lon, label).
+
+    Prefers India and highest population; applies common Indian-city aliases
+    (Bangalore->Bengaluru) so old names resolve to the right metro instead of a
+    tiny same-named village elsewhere.
+    """
+    place = (place or "").strip()
+    query = _CITY_ALIASES.get(place.lower(), place)
+    results = _geocode_once(query)
+    india = [r for r in results if r.get("country_code") == "IN"]
+    # No Indian match? Retry biased to India before trusting a foreign result.
+    if not india:
+        india = [r for r in _geocode_once(f"{query} India") if r.get("country_code") == "IN"]
+    pool = india or results
+    if not pool:
+        return None
+    r = max(pool, key=lambda x: x.get("population") or 0)
+    label = ", ".join(x for x in (r.get("name"), r.get("admin1"), r.get("country")) if x)
+    return float(r["latitude"]), float(r["longitude"]), label
+
+
+def _my_coords():
+    """Approximate current lat/lon from the internet connection."""
+    import requests
+    for url, la, lo in (
+        ("https://ipapi.co/json/", "latitude", "longitude"),
+        ("http://ip-api.com/json/", "lat", "lon"),
+    ):
+        try:
+            d = requests.get(url, timeout=8).json()
+            if d.get(la) is not None and d.get(lo) is not None:
+                return float(d[la]), float(d[lo])
+        except Exception:
+            continue
+    return None
+
+
+def travel_distance(destination: str) -> str:
+    """Approximate distance from the user's current location to a destination."""
+    import math
+    dest = _geocode((destination or "").strip())
+    if not dest:
+        return f"I could not find {destination} on the map, Sir."
+    here = _my_coords()
+    if not here:
+        return "I could not determine your current location right now, Sir."
+    lat1, lon1 = here
+    lat2, lon2, label = dest
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    straight = r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    road = straight * 1.3  # roads are typically ~30% longer than straight line
+    return (f"{label} is about {straight:.0f} kilometres away in a straight line, "
+            f"roughly {road:.0f} kilometres by road, Sir.")
+
+
 def farm_journal(entry: str) -> str:
     f = config.MEMORY_DIR / "farm_journal.txt"
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,6 +193,14 @@ SKILLS = [
                      "required": ["image_path"]}}, diagnose_leaf),
     ({"name": "get_weather", "description": "Get current weather and rain forecast for the farm location.",
       "parameters": {"type": "object", "properties": {}}}, get_weather),
+    ({"name": "current_location",
+      "description": "Get the user's approximate current location (city/region) from the internet connection.",
+      "parameters": {"type": "object", "properties": {}}}, current_location),
+    ({"name": "travel_distance",
+      "description": "Approximate distance from the user's current location to a place, e.g. 'how far is Tirupati'.",
+      "parameters": {"type": "object",
+                     "properties": {"destination": {"type": "string"}},
+                     "required": ["destination"]}}, travel_distance),
     ({"name": "farm_journal", "description": "Log a hands-free note to the farm journal.",
       "parameters": {"type": "object",
                      "properties": {"entry": {"type": "string"}}, "required": ["entry"]}}, farm_journal),

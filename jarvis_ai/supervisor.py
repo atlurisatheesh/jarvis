@@ -64,10 +64,9 @@ def health_check() -> int:
     try:
         from . import health
         print(health.summary())
-        status = health.check()
-        failed = [name for name, ok in status.items() if not ok]
-        if failed:
-            print(f"[supervisor] check FAILED: {', '.join(failed)}")
+        ready, issues = health.startup_gate()
+        if not ready:
+            print(f"[supervisor] check FAILED: {', '.join(issues)}")
             return 1
         print("[supervisor] check OK")
         return 0

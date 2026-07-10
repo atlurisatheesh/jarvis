@@ -15,6 +15,30 @@ at a time.
 
 ## Current Baseline
 
+### Verified update - 2026-07-10
+
+- The desktop core is live and supervised.
+- Custom `Leha` OpenWakeWord is deployed with strict transcript fallback.
+  Held-out result is 80% two-hit recall and zero false wakes in 280 negatives;
+  it is deliberately labeled `hybrid`, not fully approved.
+- Cloud brain streaming and sequential TTS playback are pipelined. A short live
+  dynamic request produced first text in 0.49 seconds on a healthy connection.
+- Duplicate provider speech, incomplete ONNX crash loops, test-memory leakage,
+  stale tool replay, and false-positive supervisor health were fixed.
+- The complete safe desktop suite passes: 427 tests.
+
+Remaining acceptance gates cannot be truthfully completed by code alone:
+
+1. A person must run the representative room wake protocol; speaker playback
+   is suppressed by the laptop microphone path and is not equivalent to speech.
+2. Barge-in requires measured acoustic echo cancellation or an AEC headset.
+3. Human-perfect cloned voice requires a persistent GPU/hosted TTS service and
+   consented clean recordings; Edge neural remains the latency-safe voice.
+4. Smart-home control requires actual Home Assistant entities and a scoped
+   token. Mobile OS parity requires platform permissions and device testing.
+
+The sections below retain the full design history and acceptance criteria.
+
 ### Working now
 
 - Windows always-on listener is supervised and can restart after a crash.

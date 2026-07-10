@@ -26,6 +26,7 @@ import collections
 import queue
 import math
 import os
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -33,6 +34,32 @@ import sounddevice as sd
 from . import config
 from .audio import resolve_device
 from scipy.signal import resample_poly
+
+
+def _missing_external_data(model_path: str) -> list[str]:
+    """Return missing files referenced by an ONNX external-data model.
+
+    A tiny ``.onnx`` can be only a graph that points at a separate ``.data``
+    weight file. Treating that graph as a complete wake model made the live
+    listener crash-loop even though the path itself existed.
+    """
+    try:
+        import onnx
+
+        model = onnx.load(model_path, load_external_data=False)
+        missing = []
+        for tensor in model.graph.initializer:
+            for entry in tensor.external_data:
+                if entry.key != "location":
+                    continue
+                ref = Path(model_path).parent / entry.value
+                if not ref.is_file() and str(ref) not in missing:
+                    missing.append(str(ref))
+        return missing
+    except Exception:
+        # The OpenWakeWord runtime remains the final model validator. Failure
+        # to inspect metadata must not reject a normal self-contained model.
+        return []
 
 
 def _resolve_custom_models() -> list:
@@ -52,7 +79,15 @@ def _resolve_custom_models() -> list:
             continue
         full = p if os.path.isabs(p) else str(config.BASE_DIR / p)
         if os.path.isfile(full):
-            paths.append(full)
+            missing = _missing_external_data(full)
+            if missing:
+                print(
+                    f"[oww] incomplete model bundle, skipping {full}; "
+                    f"missing: {', '.join(missing)}",
+                    flush=True,
+                )
+            else:
+                paths.append(full)
         else:
             print(f"[oww] custom model not found, skipping: {full}", flush=True)
 
@@ -61,7 +96,15 @@ def _resolve_custom_models() -> list:
     if single:
         full = single if os.path.isabs(single) else str(config.BASE_DIR / single)
         if os.path.isfile(full) and full not in paths:
-            paths.append(full)
+            missing = _missing_external_data(full)
+            if missing:
+                print(
+                    f"[oww] incomplete OWW_MODEL_PATH, skipping {full}; "
+                    f"missing: {', '.join(missing)}",
+                    flush=True,
+                )
+            else:
+                paths.append(full)
         elif not os.path.isfile(full):
             print(f"[oww] OWW_MODEL_PATH not found: {full}", flush=True)
 
@@ -92,6 +135,19 @@ def _resample16k(audio: np.ndarray, native: int) -> np.ndarray:
         return audio.astype(np.float32)
     g = math.gcd(native, 16000)
     return resample_poly(audio, 16000 // g, native // g).astype(np.float32)
+
+
+def _update_hit_streaks(preds, names, threshold, counts, required_hits):
+    """Return the strongest model after enough consecutive positive frames."""
+    fired = None
+    fired_score = 0.0
+    for name in names:
+        score = float(preds.get(name, 0.0))
+        counts[name] = counts.get(name, 0) + 1 if score >= threshold else 0
+        if counts[name] >= required_hits and score > fired_score:
+            fired = name
+            fired_score = score
+    return fired, fired_score
 
 
 class OWWListener:
@@ -171,6 +227,32 @@ class OWWListener:
         silent_count = 0
         woken = False
         wait_count = 0
+        hybrid_fallback = bool(
+            getattr(config, "OWW_HYBRID_TRANSCRIPT_FALLBACK", True)
+        )
+        idle_start_rms = max(
+            float(start_rms),
+            float(getattr(config, "OWW_IDLE_VAD_START_RMS", start_rms)),
+        )
+        if hybrid_fallback:
+            print(
+                f"[oww] VAD gates: idle={idle_start_rms:.0f} "
+                f"command={float(start_rms):.0f}",
+                flush=True,
+            )
+        required_hits = max(1, int(getattr(config, "OWW_REQUIRED_HITS", 2)))
+        hit_counts = {name: 0 for name in self._model_names}
+        idle_pre: collections.deque = collections.deque(maxlen=3)
+        idle_frames: list = []
+        idle_started = False
+        idle_silent_count = 0
+
+        def prepare_audio(native_audio: np.ndarray) -> np.ndarray:
+            out = _resample16k(native_audio, native)
+            rv = float(np.sqrt(np.mean(out ** 2))) or 1.0
+            if rv < 500:
+                out = out * (1500.0 / rv)
+            return np.clip(out, -32768, 32767).astype(np.int16)
 
         with sd.InputStream(
             samplerate=native,
@@ -194,6 +276,10 @@ class OWWListener:
                     frames_buf = []
                     started = False
                     silent_count = 0
+                    idle_pre.clear()
+                    idle_frames = []
+                    idle_started = False
+                    idle_silent_count = 0
                     # Keep woken state — barge-in detection after TTS done
                     continue
 
@@ -203,15 +289,29 @@ class OWWListener:
                     # openwakeword expects int16 in float range or int16; pass as int16
                     chunk_int16 = np.clip(chunk16k, -32768, 32767).astype(np.int16)
                     preds = self._model.predict(chunk_int16)
+                    # Near-miss telemetry: log real-voice scores so the
+                    # threshold can be tuned from evidence, not guesses.
+                    top_name = max(self._model_names, key=lambda n: preds.get(n, 0.0))
+                    top_score = float(preds.get(top_name, 0.0))
+                    if top_score >= 0.10:
+                        import time as _t
+                        now = _t.monotonic()
+                        if now - getattr(self, "_last_score_log", 0.0) > 1.5:
+                            self._last_score_log = now
+                            print(
+                                f"[oww] score {top_name}={top_score:.3f} "
+                                f"(threshold={self._threshold})",
+                                flush=True,
+                            )
                     # Trigger if ANY loaded model exceeds threshold. Report
                     # which one fired so logs make tuning easier.
-                    fired = None
-                    fired_score = 0.0
-                    for name in self._model_names:
-                        score = float(preds.get(name, 0.0))
-                        if score >= self._threshold and score > fired_score:
-                            fired = name
-                            fired_score = score
+                    fired, fired_score = _update_hit_streaks(
+                        preds,
+                        self._model_names,
+                        self._threshold,
+                        hit_counts,
+                        required_hits,
+                    )
                     if fired is not None:
                         print(
                             f"[oww] WAKE WORD DETECTED "
@@ -224,7 +324,49 @@ class OWWListener:
                         frames_buf = []
                         started = False
                         silent_count = 0
+                        idle_pre.clear()
+                        idle_frames = []
+                        idle_started = False
+                        idle_silent_count = 0
+                        for name in hit_counts:
+                            hit_counts[name] = 0
                         yield None
+                    elif hybrid_fallback:
+                        # Keep a normal utterance VAD running beside OWW. When
+                        # the model misses, the completed audio is transcribed
+                        # and must still pass AssistantSession's strict wake
+                        # gate before any command can run.
+                        rms = float(np.sqrt(np.mean(raw ** 2)))
+                        if not idle_started:
+                            idle_pre.append(raw)
+                            if rms > idle_start_rms:
+                                idle_frames.extend(idle_pre)
+                                idle_pre.clear()
+                                idle_started = True
+                                idle_silent_count = 0
+                        else:
+                            idle_frames.append(raw)
+                            if rms > idle_start_rms:
+                                idle_silent_count = 0
+                            else:
+                                idle_silent_count += 1
+                            if (
+                                idle_silent_count >= silence_need
+                                or len(idle_frames) >= max_blocks
+                            ):
+                                audio = np.concatenate(idle_frames)
+                                idle_frames = []
+                                idle_started = False
+                                idle_silent_count = 0
+                                idle_pre.clear()
+                                out = prepare_audio(audio)
+                                if len(out) >= min_samples:
+                                    yield ("transcript_fallback", out)
+                                while not q_in.empty():
+                                    try:
+                                        q_in.get_nowait()
+                                    except Exception:
+                                        break
                 else:
                     # --- VAD command capture ---
                     rms = float(np.sqrt(np.mean(raw ** 2)))
@@ -252,12 +394,8 @@ class OWWListener:
                                 frames_buf = []
                                 started = False
                                 silent_count = 0
-                                # Resample + gentle normalize for Whisper
-                                out = _resample16k(audio, native)
-                                rv = float(np.sqrt(np.mean(out ** 2))) or 1.0
-                                if rv < 500:
-                                    out = out * (1500.0 / rv)
-                                out = np.clip(out, -32768, 32767).astype(np.int16)
+                                # Resample + gentle normalize for STT.
+                                out = prepare_audio(audio)
                                 if len(out) >= min_samples:
                                     yield out
                                 # After yielding: stay in command-capture mode if

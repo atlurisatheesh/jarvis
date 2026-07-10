@@ -12,6 +12,80 @@
 
 ---
 
+## Verified Live State - 2026-07-10
+
+This section supersedes historical phase notes below when they conflict.
+
+- Desktop listener, supervisor, and webserver are running as one supervised
+  listener plus one web process.
+- Wake engine is `openwakeword+strict_transcript` using the complete
+  `voices/leha.onnx` model. The incomplete `hey_leha.onnx` graph is skipped
+  because its external weights file is absent.
+- Production wake settings are threshold `0.5`, two consecutive hits, and
+  strict transcript fallback. Held-out neural result: 80% recall and 0/280
+  false wakes. This is a hybrid candidate, not Siri-grade approval.
+- Brain and sentence TTS are genuinely pipelined: model tokens continue
+  generating while one voice worker speaks queued chunks.
+- Mid-stream provider failure cannot start a second provider after speech has
+  begun, preventing duplicate answers.
+- A fallback STT result applies only to that utterance. Deepgram remains the
+  primary ears provider unless an authentication failure explicitly disables it.
+- Persistent conversations survive restarts, but old turns are injected only
+  as labeled historical context. Automated tests use an isolated store.
+- Supervisor health uses the real startup gate; incomplete wake bundles and
+  required-subsystem failures are visible instead of falsely reporting ready.
+- Production voice is the private ElevenLabs clone using streamed 24 kHz PCM.
+  A fair speaker-embedding comparison against both authorized recordings kept
+  the existing clone (`0.670` centroid similarity) over clean-only (`0.542`)
+  and combined-sample (`0.632`) candidates. Edge neural female voice remains
+  the pre-audio network/quota fallback.
+- ElevenLabs streamed-answer dispatch is covered by tests. A mid-stream outage
+  ends that utterance instead of switching to Edge and producing two voices.
+  A live API benchmark produced first PCM in 1.455 seconds and completed the
+  short test utterance in 1.646 seconds with no fallback.
+- Barge-in remains disabled because this laptop has no validated AEC or
+  hardware AEC device. This is a safety requirement, not missing routing code.
+- Complete safe root suite: **439 passed, 0 failed**. No shutdown, restart,
+  sleep, call, message, or other destructive action was executed.
+
+External/physical acceptance still required: 20-call room wake test, one-hour
+false-wake soak with real room audio, validated headset/AEC before barge-in,
+Home Assistant devices/token and OS-level mobile work.
+
+Latest recorded-clip spot check: the neural two-hit model woke on 1/5 owner
+clips; strict Deepgram rescue raised total hybrid recovery to 3/5. This is a
+small diagnostic sample, but it confirms wake is still the principal blocker
+and the model must remain unapproved.
+
+Wake reliability correction on 2026-07-10: idle fallback now starts with
+Deepgram English + `Leha` keyterm bias instead of unstable auto-language
+detection. On the same owner validation clip, auto-language took 3.54 seconds
+and varied across unrelated languages; wake-biased transcription returned
+`Leha` in 1.53 seconds. Exact Greek transliterations observed in live logs are
+accepted, while ambiguous `yeah/yes/hello` requires independent Sarvam
+confirmation. The cloned `Yes, Sir?` acknowledgement is cached locally and
+completes playback in 0.79 seconds without a TTS network request.
+The hybrid transcript VAD now uses a stricter idle gate (`140`) while command
+capture remains at `90`; a live 30-second room soak produced zero background
+transcriptions, keeping the listener available for the actual wake call.
+Idle wake clips are checked concurrently by Deepgram's Leha-keyterm mode and
+Sarvam; either result must independently pass the strict wake gate. On an owner
+validation clip this recovered a valid Bengali-script Leha transcript in 1.31
+seconds, while two unrelated transcripts remain ignored.
+The fixed cloned acknowledgement now uses Windows native default-endpoint WAV
+playback at `2.0x` safe gain. Playback completion is logged explicitly; the
+cached file measures RMS `0.144`, peak `0.684`, and finishes in about 1.19s.
+Audio-route diagnosis found two active Senary endpoints. The Windows default
+endpoint completed playback but was inaudible to the owner, so Leha now routes
+cached and streamed speech explicitly to device `4`, `Speakers (2- Senary
+Audio)`. Both endpoint and Python-session volume were verified at 100%/unmuted.
+Post-wake commands now run Deepgram and Sarvam concurrently and select the
+stronger non-noise transcript, favoring fuller text and Indian scripts. The
+latest captured command is retained locally as `logs/last_command.wav` for
+provider-by-provider diagnosis; logs remain gitignored.
+
+---
+
 ## At-a-Glance Scorecard
 
 | Phase | Topic | Code built | Wired into live loop | Tests | Status |

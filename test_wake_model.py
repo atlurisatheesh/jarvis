@@ -91,6 +91,27 @@ class TestWakeTrainer(unittest.TestCase):
                 # Just verify it's callable
                 mock_build()
 
+    def test_pipeline_detects_split_train_and_eval_dirs(self):
+        from tools import train_and_evaluate_leha_wake as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel in (
+                "train/positive",
+                "train/negative",
+                "heldout/positive",
+                "heldout/negative",
+            ):
+                (root / rel).mkdir(parents=True)
+
+            train_pos, train_neg = pipeline._train_dirs(root)
+            eval_pos, eval_neg = pipeline._eval_dirs(root)
+
+            self.assertEqual(train_pos, root / "train" / "positive")
+            self.assertEqual(train_neg, root / "train" / "negative")
+            self.assertEqual(eval_pos, root / "heldout" / "positive")
+            self.assertEqual(eval_neg, root / "heldout" / "negative")
+
 
 class TestWakeEvaluator(unittest.TestCase):
     """Tests for jarvis_ai.wake_evaluator."""
@@ -176,8 +197,8 @@ class TestWakeLocalOnnx(unittest.TestCase):
     def test_wake_validation_status_uses_actual_availability(self):
         from jarvis_ai import pro_ops
 
-        with patch("jarvis_ai.wake_local_onnx.is_available", return_value=False), \
-             patch("jarvis_ai.pro_ops.config.CUSTOM_WAKE_ENABLED", True):
+        with patch("jarvis_ai.wake_openwakeword.is_available", return_value=False), \
+             patch("jarvis_ai.wake_openwakeword._resolve_custom_models", return_value=[]):
             status = pro_ops.wake_validation_status()
 
         self.assertEqual(status["engine"], "strict_transcript")
@@ -291,19 +312,18 @@ class TestWakePhraseFallback(unittest.TestCase):
         self.assertFalse(second.acted)
         self.assertEqual(second.ignored_reason, "hallucination")
 
-    def test_active_window_does_not_send_unclear_text_to_brain(self):
+    def test_clean_bare_wake_accepts_one_dynamic_followup_then_relocks(self):
         from jarvis_ai.assistant_session import AssistantSession
 
-        def fail_brain(_):
-            raise AssertionError("brain should not run for unclear follow-up")
-
         session = AssistantSession(followup_seconds=0)
-        first = session.handle("Leha", fail_brain)
-        second = session.handle("some unclear random words", fail_brain)
+        first = session.handle("Leha", lambda text: f"brain:{text}")
+        second = session.handle("some unclear random words", lambda text: f"brain:{text}")
+        third = session.handle("another request", lambda text: f"brain:{text}")
 
         self.assertEqual(first.reply, "Yes, Sir?")
-        self.assertFalse(second.acted)
-        self.assertEqual(second.ignored_reason, "followup_requires_wake")
+        self.assertTrue(second.acted)
+        self.assertEqual(second.reply, "brain:some unclear random words")
+        self.assertEqual(third.ignored_reason, "no wake trigger")
 
 
 if __name__ == "__main__":

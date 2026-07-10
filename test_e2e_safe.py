@@ -29,6 +29,11 @@ class SafeEndToEndTests(unittest.TestCase):
         self.tool_patch = patch("jarvis_ai.assistant_core.skills.run_tool", side_effect=fake_tool)
         self.tool_patch.start()
         self.addCleanup(self.tool_patch.stop)
+        self.confirmed_tool_patch = patch(
+            "jarvis_ai.assistant_core.skills.run_confirmed_tool", side_effect=fake_tool
+        )
+        self.confirmed_tool_patch.start()
+        self.addCleanup(self.confirmed_tool_patch.stop)
 
     def session(self) -> AssistantSession:
         return AssistantSession(followup_seconds=25)
@@ -83,13 +88,15 @@ class SafeEndToEndTests(unittest.TestCase):
         result = session.handle("what time is it", lambda _: "brain should not run")
         self.assertEqual(result.ignored_reason, "no wake trigger")
 
-    def test_default_session_does_not_accept_unaddressed_followup(self):
+    def test_bare_wake_accepts_exactly_one_command(self):
         session = AssistantSession()
         first = session.handle("Leha", lambda _: "brain should not run")
         self.assertTrue(first.acted)
         result = session.handle("open chrome", lambda _: "brain should not run")
-        self.assertEqual(result.ignored_reason, "no wake trigger")
-        self.assertFalse(self.calls)
+        self.assertTrue(result.acted)
+        self.assertEqual(self.calls[-1], ("open_app", {"name": "chrome"}))
+        ignored = session.handle("open PowerPoint", lambda _: "brain should not run")
+        self.assertEqual(ignored.ignored_reason, "no wake trigger")
 
     def test_phone_skill_builds_adb_commands_without_running_adb(self):
         commands: list[tuple[str, ...]] = []
@@ -102,7 +109,10 @@ class SafeEndToEndTests(unittest.TestCase):
         self.assertEqual(commands[2], ("shell", "input", "keyevent", "KEYCODE_HOME"))
 
     def test_voice_configuration_is_loadable(self):
-        self.assertIn(config.TTS_ENGINE, {"edge", "powershell", "hf", "clone", "piper", "pyttsx3"})
+        self.assertIn(
+            config.TTS_ENGINE,
+            {"edge", "powershell", "hf", "clone", "piper", "pyttsx3", "elevenlabs"},
+        )
 
     def test_health_command_is_local_and_safe(self):
         with patch("jarvis_ai.health.voice_summary", return_value="Health: microphone ready."):
@@ -171,21 +181,29 @@ class SafeEndToEndTests(unittest.TestCase):
     def test_barge_in_is_disabled_without_echo_cancellation(self):
         self.assertFalse(config.BARGE_IN_ENABLED)
 
-    def test_auto_ears_prefers_deepgram_then_openai_then_groq(self):
+    def test_auto_ears_prefers_deepgram_then_sarvam_then_openai_then_groq(self):
         with patch.object(config, "DEEPGRAM_API_KEY", "deepgram-key"), \
+             patch.object(config, "SARVAM_API_KEY", "sarvam-key"), \
              patch.object(config, "OPENAI_API_KEY", "openai-key"), \
              patch.object(config, "GROQ_API_KEY", "groq-key"):
             self.assertEqual(Ears._select_engine("auto"), "deepgram")
         with patch.object(config, "DEEPGRAM_API_KEY", ""), \
+             patch.object(config, "SARVAM_API_KEY", "sarvam-key"), \
+             patch.object(config, "OPENAI_API_KEY", "openai-key"), \
+             patch.object(config, "GROQ_API_KEY", "groq-key"):
+            self.assertEqual(Ears._select_engine("auto"), "sarvam")
+        with patch.object(config, "DEEPGRAM_API_KEY", ""), \
+             patch.object(config, "SARVAM_API_KEY", ""), \
              patch.object(config, "OPENAI_API_KEY", "openai-key"), \
              patch.object(config, "GROQ_API_KEY", "groq-key"):
             self.assertEqual(Ears._select_engine("auto"), "openai")
         with patch.object(config, "DEEPGRAM_API_KEY", ""), \
+             patch.object(config, "SARVAM_API_KEY", ""), \
              patch.object(config, "OPENAI_API_KEY", ""), \
              patch.object(config, "GROQ_API_KEY", "groq-key"):
             self.assertEqual(Ears._select_engine("auto"), "groq")
 
-    def test_cloud_ears_switches_to_next_provider_without_local_block(self):
+    def test_cloud_ears_uses_fallback_without_permanently_replacing_primary(self):
         ears = Ears.__new__(Ears)
         ears.engine = "openai"
         ears._disabled_providers = set()
@@ -194,7 +212,8 @@ class SafeEndToEndTests(unittest.TestCase):
         with patch.object(ears, "_openai", return_value=""), \
              patch.object(ears, "_groq", return_value="Leha heard this"):
             self.assertEqual(ears.transcribe_file("ignored.wav"), "Leha heard this")
-        self.assertEqual(ears.engine, "groq")
+        self.assertEqual(ears.engine, "openai")
+        self.assertEqual(ears._provider_order, ["openai", "groq"])
 
 
 if __name__ == "__main__":

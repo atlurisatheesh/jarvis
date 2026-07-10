@@ -17,6 +17,7 @@ Features:
 - Fast local reflexes: media, volume, time, weather, open/close handled without LLM.
 """
 import threading
+import os
 import sys
 import time
 import json
@@ -46,6 +47,7 @@ from .ears import Ears
 from .mouth import Mouth
 from .runtime_state import runtime
 from .scheduler import Scheduler
+from . import wake_miss_log
 from .wake_phrases import has_trigger, is_hallucination, normalize_text, wake_confidence
 
 
@@ -242,7 +244,38 @@ class LehaSession:
         try:
             runtime.set("transcribing")
             stt_started = time.perf_counter()
-            text = self.ears.transcribe_int16(audio).strip()
+            idle_wake_probe = not force_active and not self.session.is_active()
+            command_probe = force_active or self.session.is_active()
+            if command_probe and getattr(config, "SAVE_LAST_COMMAND_AUDIO", False):
+                try:
+                    import soundfile as sf
+
+                    os.makedirs(os.path.dirname(config.LAST_COMMAND_AUDIO_PATH), exist_ok=True)
+                    sf.write(config.LAST_COMMAND_AUDIO_PATH, audio, config.SAMPLE_RATE)
+                except Exception as e:
+                    print(f"[audio] last command save failed ({e})", flush=True)
+            used_wake_biased = False
+            used_wake_consensus = False
+            if command_probe and hasattr(self.ears, "transcribe_int16_command_candidates"):
+                text = self.ears.transcribe_int16_command_candidates(audio).strip()
+            elif idle_wake_probe and hasattr(self.ears, "transcribe_int16_wake_candidates"):
+                text = self.ears.transcribe_int16_wake_candidates(audio).strip()
+                used_wake_biased = True
+                used_wake_consensus = True
+            elif idle_wake_probe and hasattr(self.ears, "transcribe_int16_wake_biased"):
+                # Idle audio has one job: establish "Leha". Deepgram's normal
+                # auto-language mode repeatedly classified the owner's wake as
+                # Spanish/Greek. Start with English + Leha keyterm bias instead
+                # of spending one slow request before retrying the same audio.
+                text = self.ears.transcribe_int16_wake_biased(audio).strip()
+                used_wake_biased = True
+                if not text and hasattr(self.ears, "transcribe_int16_sarvam"):
+                    text = self.ears.transcribe_int16_sarvam(audio).strip()
+            else:
+                text = self.ears.transcribe_int16(
+                    audio,
+                    rescue_indian=not idle_wake_probe,
+                ).strip()
             stt_elapsed = (time.perf_counter() - stt_started) * 1000
             runtime.timing("stt", stt_elapsed)
             if self._budget:
@@ -255,6 +288,50 @@ class LehaSession:
                 return False
             print(f"[debug] heard: '{text}'", flush=True)
             low = normalize_text(text)
+
+            # Deepgram auto-language detection can misread short wake-only
+            # audio ("Leha") as unrelated text. Before rejecting an idle
+            # utterance, retry once with English + Leha keyword bias. This is
+            # deliberately idle-only so Indian-language follow-up commands are
+            # not reinterpreted.
+            if (
+                getattr(config, "DEEPGRAM_WAKE_RETRY_ENABLED", True)
+                and not used_wake_biased
+                and not self.session.is_active()
+                and not has_trigger(text)
+                and hasattr(self.ears, "transcribe_int16_wake_biased")
+            ):
+                retry_text = self.ears.transcribe_int16_wake_biased(audio).strip()
+                if retry_text and retry_text != text:
+                    retry_conf = wake_confidence(retry_text)
+                    print(
+                        f"[wake-retry] heard: '{retry_text}' "
+                        f"wake_conf={retry_conf:.2f}",
+                        flush=True,
+                    )
+                    if has_trigger(retry_text):
+                        text = retry_text
+                        low = normalize_text(text)
+
+            # "Leha" is often reduced to "yeah" by English STT. Never accept
+            # that broad word directly: ask the independent Indian-language
+            # recognizer to confirm the same audio and wake only on a strict
+            # Leha transcript. Ordinary room conversation therefore stays
+            # blocked while genuine owner calls get a second chance.
+            ambiguous = normalize_text(text) in {"yeah", "yes", "hey", "hello"}
+            if (
+                not self.session.is_active()
+                and not has_trigger(text)
+                and ambiguous
+                and not used_wake_consensus
+                and hasattr(self.ears, "transcribe_int16_sarvam")
+            ):
+                verified_text = self.ears.transcribe_int16_sarvam(audio).strip()
+                if verified_text:
+                    print(f"[wake-verify] heard: '{verified_text}'", flush=True)
+                    if has_trigger(verified_text):
+                        text = verified_text
+                        low = normalize_text(text)
 
             # With barge-in explicitly enabled, the mic remains available while
             # Leha is speaking. Route every interruption through the guard so
@@ -296,9 +373,11 @@ class LehaSession:
             result = self.session.handle(text, _ask_streaming_tracked)
             if result.ignored_reason:
                 if result.ignored_reason == "no wake trigger":
+                    confidence = wake_confidence(text)
+                    wake_miss_log.log_miss(text, confidence)
                     print(
                         f"[debug] ignored: {result.ignored_reason} "
-                        f"wake_conf={wake_confidence(text):.2f}",
+                        f"wake_conf={confidence:.2f}",
                         flush=True,
                     )
                 else:
@@ -403,6 +482,15 @@ class LehaSession:
             ):
                 if self._quit:
                     break
+                if (
+                    isinstance(event, tuple)
+                    and len(event) == 2
+                    and event[0] == "transcript_fallback"
+                ):
+                    if self._handle_audio(event[1], force_active=False):
+                        self._quit = True
+                        break
+                    continue
                 if event is None:
                     # Wake word detected
                     if self.speech.is_speaking():
@@ -414,8 +502,8 @@ class LehaSession:
                             continue
                     _play_earcon("wake")
                     if config.SPEAK_WAKE_ACK:
-                        self._say("Ready.")
-                        self.speech.join(timeout=3.0)
+                        self._say("Yes, Sir?")
+                        self.speech.join(timeout=4.0)
                     self.session.activate(getattr(config, "WAKE_ONLY_FOLLOWUP_SECONDS", 8))
                 else:
                     if self._handle_audio(event, force_active=True):
@@ -437,7 +525,7 @@ class LehaSession:
 
     def _run_oww(self):
         listener = wake_openwakeword.OWWListener()
-        phrase = getattr(config, "OWW_MODEL_NAME", "hey_jarvis").replace("_", " ")
+        phrase = " / ".join(name.replace("_", " ") for name in listener._model_names)
         print(f"[oww] say '{phrase}' to wake Leha", flush=True)
         self._run_wake_engine(listener, "oww")
 

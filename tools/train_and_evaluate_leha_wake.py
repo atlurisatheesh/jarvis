@@ -36,6 +36,24 @@ ONNX_OUTPUT = ROOT / "jarvis_ai" / "voices" / "leha_wake_model.onnx"
 DEFAULT_DATA_DIR = ROOT / "jarvis_ai" / "voices" / "wake_synthetic"
 
 
+def _train_dirs(data_dir: Path) -> tuple[Path, Path]:
+    """Return train positive/negative dirs for either supported layout."""
+    split_pos = data_dir / "train" / "positive"
+    split_neg = data_dir / "train" / "negative"
+    if split_pos.exists() and split_neg.exists():
+        return split_pos, split_neg
+    return data_dir / "positive", data_dir / "negative"
+
+
+def _eval_dirs(data_dir: Path) -> tuple[Path, Path]:
+    """Return held-out eval dirs, falling back to flat dirs for old datasets."""
+    heldout_pos = data_dir / "heldout" / "positive"
+    heldout_neg = data_dir / "heldout" / "negative"
+    if heldout_pos.exists() and heldout_neg.exists():
+        return heldout_pos, heldout_neg
+    return data_dir / "positive", data_dir / "negative"
+
+
 def step_generate(data_dir: Path, positives: int, negatives: int) -> bool:
     """Run the synthetic data generator. Returns True on success."""
     print(f"\n{'='*60}\n[1/4] Generating synthetic data -> {data_dir}\n{'='*60}")
@@ -57,8 +75,7 @@ def step_train(data_dir: Path, output: Path, epochs: int) -> bool:
     """Train the wake model. Returns True on success."""
     print(f"\n{'='*60}\n[2/4] Training wake model -> {output}\n{'='*60}")
     from jarvis_ai import wake_trainer
-    pos_dir = data_dir / "positive"
-    neg_dir = data_dir / "negative"
+    pos_dir, neg_dir = _train_dirs(data_dir)
     if not pos_dir.exists() or not neg_dir.exists():
         print(f"[pipeline] missing data dirs: {pos_dir} / {neg_dir}")
         return False
@@ -98,14 +115,13 @@ def step_evaluate(model_path: Path, data_dir: Path) -> dict | None:
         print("[pipeline] wake_evaluator has no evaluate/_evaluate_model function")
         return None
     try:
-        result = evaluate(
-            str(model_path),
-            str(data_dir / "positive"),
-            str(data_dir / "negative"),
-            0.995,
-        )
+        pos_dir, neg_dir = _eval_dirs(data_dir)
+        result = evaluate(str(model_path), str(pos_dir), str(neg_dir), 0.995)
+        report_path = ROOT / "processed" / f"wake_eval_report_{model_path.stem}.json"
+        report_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
         result_str = json.dumps(result, indent=2, default=str)
         print(result_str)
+        print(f"[pipeline] eval report -> {report_path}")
         return result
     except Exception as e:
         print(f"[pipeline] evaluation failed: {e}")
@@ -119,7 +135,7 @@ def step_deploy(model_path: Path, approved: bool | None) -> bool:
         print("[pipeline] no model to deploy")
         return False
     if approved is False:
-        print("[pipeline] MODEL NOT APPROVED — do not deploy. Tune threshold or add data.")
+        print("[pipeline] MODEL NOT APPROVED - do not deploy. Tune threshold or add data.")
         return False
     # The model already lives at the configured CUSTOM_WAKE_MODEL_PATH, so no
     # copy is needed. We only print how to enable it (preserving the opt-in flag).
@@ -137,8 +153,8 @@ def run_pipeline(data_dir: Path, output: Path, epochs: int,
     if not skip_generate:
         if not step_generate(data_dir, positives, negatives):
             return 1
-    elif not (data_dir / "positive").exists():
-        print(f"[pipeline] --skip-generate but no data at {data_dir / 'positive'}")
+    elif not _train_dirs(data_dir)[0].exists():
+        print(f"[pipeline] --skip-generate but no training data at {data_dir}")
         return 1
 
     if not step_train(data_dir, output, epochs):

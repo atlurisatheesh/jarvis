@@ -44,20 +44,33 @@ INDIC_WAKE_TRIGGERS = (
     "લેહા", "લેખા", "લીહા",
 )
 
+# Clean Unicode wake triggers. The older block above is preserved for backward
+# compatibility with previous mojibake logs, but these are the real scripts.
+INDIC_WAKE_TRIGGERS = INDIC_WAKE_TRIGGERS + (
+    "\u0932\u0947\u0939\u093e", "\u0932\u0947\u0916\u093e", "\u0932\u0940\u0939\u093e",
+    "\u0c32\u0c47\u0c39\u0c3e", "\u0c32\u0c47\u0c16", "\u0c32\u0c40\u0c39\u0c3e",
+    "\u0bb2\u0bc7\u0bb9\u0bbe", "\u0bb2\u0bc7\u0b95\u0bbe", "\u0bb2\u0bc0\u0bb9\u0bbe",
+    "\u0cb2\u0cc7\u0cb9\u0cbe", "\u0cb2\u0cc7\u0c96\u0cbe", "\u0cb2\u0cc0\u0cb9\u0cbe",
+    "\u0d32\u0d47\u0d39", "\u0d32\u0d47\u0d16", "\u0d32\u0d40\u0d39",
+    "\u09b2\u09c7\u09b9\u09be", "\u09b2\u09c7\u0996\u09be", "\u09b2\u09c0\u09b9\u09be",
+    "\u0ab2\u0ac7\u0ab9\u0abe", "\u0ab2\u0ac7\u0a96\u0abe", "\u0ab2\u0ac0\u0ab9\u0abe",
+)
+
 # Exact strict-mode variants observed from this laptop microphone. Keep this
 # intentionally tiny; broad aliases such as layer/later still cause false wakes.
 OBSERVED_STRICT_WAKE_TRIGGERS = (
     "lehon",
     "lehav",
+    "lehan",
+    "lehrer",
+    "σλέχα",
+    "λέχα",
 )
 
 # ── Exact / known Whisper manglings of "Leha" ──────────────────────
 TRIGGERS = (
     # exact / greetings
     "hey leha", "hi leha", "ok leha", "okay leha", "hello leha",
-    # openWakeWord "hey jarvis" trigger (used when OWW is the primary engine)
-    "hey jarvis", "hi jarvis", "ok jarvis", "okay jarvis", "hello jarvis",
-    "jarvis",
     # core variants
     "leha", "leah", "liha", "leeha", "layha", "laiha", "lehav", "lehra",
     "leja", "lekha", "lleha",
@@ -98,7 +111,6 @@ _STRICT_TRIGGERS = (
     "leha", "leah", "liha", "leeha",
     "lehah", "lehha", "lehaa", "lehe", "leia", "leja", "lekha", "lleha",
     "hey leah", "ok leah", "okay leah",
-    "hey jarvis", "hi jarvis", "jarvis",
     *OBSERVED_STRICT_WAKE_TRIGGERS,
     *INDIC_WAKE_TRIGGERS,
 )
@@ -239,8 +251,13 @@ def wake_confidence(text: str) -> float:
 
 
 def normalize_text(text: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace."""
-    table = str.maketrans({c: " " for c in string.punctuation})
+    """Lowercase, strip punctuation, collapse whitespace.
+
+    Includes Indic danda/double-danda (।॥): STT returns them after
+    Indian-script wake words ("লেখা।"), and ASCII string.punctuation
+    alone left them attached, breaking exact wake matching.
+    """
+    table = str.maketrans({c: " " for c in string.punctuation + "।॥"})
     return " ".join((text or "").lower().translate(table).split())
 
 

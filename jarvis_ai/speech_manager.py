@@ -14,6 +14,8 @@ from __future__ import annotations
 import threading
 import time
 
+from . import config
+
 
 class SpeechManager:
     """Thread-safe speech queue with generation-based cancellation."""
@@ -29,6 +31,7 @@ class SpeechManager:
         self._history: list[dict] = []
         self._max_history = 50
         self._cancel_requested = False
+        self._active_started = 0.0
 
     # -- generation management -----------------------------------------------
 
@@ -50,11 +53,13 @@ class SpeechManager:
             self._active_generation = generation
             self._speaking = True
             self._cancel_requested = False
+            self._active_started = time.monotonic()
 
     def _clear_active(self):
         with self._lock:
             self._speaking = False
             self._speak_thread = None
+            self._active_started = 0.0
 
     def _wait_for_mouth_done(self, generation: int, timeout: float | None = None):
         """Clear manager speech state after the underlying Mouth finishes."""
@@ -75,11 +80,24 @@ class SpeechManager:
             mouth_speaking = bool(self._mouth.is_speaking())
         except Exception:
             mouth_speaking = False
+        stale = False
         with self._lock:
+            if self._speaking and self._active_started:
+                max_seconds = float(getattr(config, "SPEECH_STALE_SECONDS", 35.0))
+                stale = max_seconds > 0 and (time.monotonic() - self._active_started) > max_seconds
+            if stale:
+                self._speaking = False
+                self._speak_thread = None
             if self._speaking and not mouth_speaking:
                 self._speaking = False
                 self._speak_thread = None
-            return self._speaking
+            speaking = self._speaking
+        if stale:
+            try:
+                self._mouth.stop()
+            except Exception:
+                pass
+        return speaking
 
     def stop(self):
         """Interrupt current speech immediately."""

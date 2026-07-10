@@ -9,14 +9,27 @@ Usage:
 from __future__ import annotations
 import sys
 import time
+from unittest.mock import patch
 
 sys.path.insert(0, r"D:\jarvis")
 
 from jarvis_ai import config, wake_phrases, wake_local_onnx, wake_porcupine
+
+
+def test_openwakeword_skips_model_with_missing_external_weights(tmp_path):
+    from jarvis_ai import wake_openwakeword
+
+    graph = tmp_path / "hey_leha.onnx"
+    graph.write_bytes(b"graph only")
+    missing = str(tmp_path / "hey_leha.onnx.data")
+    with patch.object(config, "OWW_CUSTOM_MODELS", [str(graph)]), \
+         patch.object(config, "OWW_MODEL_PATH", ""), \
+         patch.object(wake_openwakeword, "_missing_external_data", return_value=[missing]):
+        assert wake_openwakeword._resolve_custom_models() == []
 from jarvis_ai.audio import resolve_device
 
 
-def test_trigger_matching(text: str) -> dict:
+def analyze_trigger_matching(text: str) -> dict:
     """Return detailed trigger match info for a piece of text."""
     result = {
         "raw": text,
@@ -49,7 +62,7 @@ def test_microphone_once():
     text = ears.transcribe_int16(audio).strip()
     print(f"\nSTT heard: '{text}'")
 
-    info = test_trigger_matching(text)
+    info = analyze_trigger_matching(text)
     print("\nTrigger analysis:")
     for k, v in info.items():
         print(f"  {k}: {v}")
@@ -91,7 +104,7 @@ def live_wake_loop():
         if not text:
             continue
 
-        info = test_trigger_matching(text)
+        info = analyze_trigger_matching(text)
         woke = info["has_trigger"] and not info["is_hallucination"]
 
         if woke:
@@ -100,7 +113,7 @@ def live_wake_loop():
             if command:
                 print(f"[CMD]   '{command}'")
         else:
-            print(f"[idle]  '{text.ct}' | conf={info['wake_confidence']:.2f} "
+            print(f"[idle]  '{text}' | conf={info['wake_confidence']:.2f} "
                   f"mode={'strict' if info['strict_mode'] else 'broad'}")
 
 
@@ -113,13 +126,38 @@ def main():
 
     if args.text:
         print(f"Testing: '{args.text}'")
-        info = test_trigger_matching(args.text)
+        info = analyze_trigger_matching(args.text)
         for k, v in info.items():
             print(f"  {k}: {v}")
     elif args.loop:
         live_wake_loop()
     else:
         test_microphone_once()
+
+
+def test_telugu_script_wake_trigger():
+    text = "\u0c32\u0c47\u0c39\u0c3e \u0c24\u0c46\u0c32\u0c41\u0c17\u0c41\u0c32\u0c4b \u0c12\u0c15 \u0c2a\u0c3e\u0c1f \u0c2a\u0c3e\u0c21\u0c41"
+    info = analyze_trigger_matching(text)
+
+    assert info["has_trigger"]
+    assert "\u0c2a\u0c3e\u0c1f" in info["stripped"]
+
+
+def test_lehan_observed_variant_wakes():
+    info = analyze_trigger_matching("Lehan sing a song")
+
+    assert info["has_trigger"]
+
+
+def test_lehrer_observed_variant_wakes():
+    info = analyze_trigger_matching("Lehrer sing a song")
+
+    assert info["has_trigger"]
+
+
+def test_greek_leha_transliteration_observed_in_live_log_wakes():
+    assert analyze_trigger_matching("Σλέχα")["has_trigger"]
+    assert analyze_trigger_matching("λέχα")["has_trigger"]
 
 
 if __name__ == "__main__":

@@ -35,7 +35,10 @@ class TestStrictMode(unittest.TestCase):
     def test_strict_mode_false_when_custom_disabled(self):
         from jarvis_ai import wake_phrases
         with patch("jarvis_ai.config.CUSTOM_WAKE_ENABLED", False):
-            self.assertFalse(wake_phrases.strict_mode())
+            # Production transcript fallback remains strict even when the
+            # retired private model is disabled; broad aliases caused random
+            # room wakes in live testing.
+            self.assertTrue(wake_phrases.strict_mode())
 
     def test_strict_mode_true_when_custom_enabled(self):
         from jarvis_ai import wake_phrases
@@ -43,10 +46,10 @@ class TestStrictMode(unittest.TestCase):
             self.assertTrue(wake_phrases.strict_mode())
 
     def test_has_trigger_loose_mode_matches_broad_alias(self):
-        # "layla" is a broad alias that should match in loose mode
+        # Broad aliases stay blocked by the production strict-wake policy.
         from jarvis_ai import wake_phrases
         with patch("jarvis_ai.config.CUSTOM_WAKE_ENABLED", False):
-            self.assertTrue(wake_phrases.has_trigger("layla what time is it"))
+            self.assertFalse(wake_phrases.has_trigger("layla what time is it"))
 
     def test_has_trigger_strict_mode_drops_broad_alias(self):
         # In strict mode, broad aliases like "layla" should NOT trigger

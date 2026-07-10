@@ -21,6 +21,23 @@ from . import config
 _STORE = config.MEMORY_DIR / "conversation.json"
 _LOCK = threading.Lock()
 
+# Exact fixture turns produced by provider failover tests in older builds.
+# Keep the on-disk history untouched, but never feed these synthetic pairs to
+# a live model or show them as personal conversation memory.
+_TEST_ARTIFACTS = {
+    ("first", "local reply"),
+    ("second", "local reply"),
+    ("hello", "slow local reply"),
+}
+
+
+def _is_test_artifact(turn: dict) -> bool:
+    pair = (
+        str(turn.get("user", "")).strip().lower(),
+        str(turn.get("assistant", "")).strip().lower(),
+    )
+    return pair in _TEST_ARTIFACTS
+
 
 def _load() -> list[dict]:
     if not _STORE.exists():
@@ -75,6 +92,8 @@ def load_recent(n: int = 20) -> list[dict]:
         return []
     with _LOCK:
         turns = _load()
+    if getattr(config, "CONVERSATION_IGNORE_TEST_ARTIFACTS", True):
+        turns = [turn for turn in turns if not _is_test_artifact(turn)]
     if not turns:
         return []
     return turns[-n:]

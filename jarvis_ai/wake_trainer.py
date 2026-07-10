@@ -1,4 +1,4 @@
-"""Wake-word model trainer.
+﻿"""Wake-word model trainer.
 
 Loads positive/negative WAV clips, trains a small CNN with PyTorch, and exports
 to ONNX with a sigmoid output suitable for ``wake_local_onnx.LocalOnnxWakeListener``.
@@ -156,7 +156,7 @@ def _export_onnx(model: "torch.nn.Module", path: str | Path):
         dynamic_axes={"audio": {0: "batch"}, "logits": {0: "batch"}},
         opset_version=17,
     )
-    print(f"[trainer] ONNX exported → {path}")
+    print(f"[trainer] ONNX exported -> {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ def train(
             best_val_loss = avg_val
             _export_onnx(model, output)
 
-    print(f"[trainer] Best val loss: {best_val_loss:.4f} → {output}")
+    print(f"[trainer] Best val loss: {best_val_loss:.4f} -> {output}")
     return output
 
 
@@ -327,7 +327,6 @@ def main():
         return
 
     train(pos, neg, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, output=args.output)
-
 
 if __name__ == "__main__":
     main()

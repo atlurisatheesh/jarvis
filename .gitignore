@@ -1,5 +1,9 @@
 .groq_key
 .deepgram_key
+.elevenlabs_key
+.elevenlabs_voice
+.elevenlabs_candidate_voice
+.elevenlabs_voice.backup
 .openai_key
 .openai_key.backup
 .cloudflare_token
@@ -43,6 +47,33 @@ jarvis_ai/memory_store/
 
 # Wake-training dataset outputs (large, regenerable).
 kaggle_wake_job/outputs/
+kaggle_wake_job/downloaded_outputs/
+kaggle_wake_job/failed_outputs/
+kaggle_wake_job/failed_small/
+kaggle_wake_job/final_outputs_v*/
+kaggle_wake_job/owner_wake_train_stage/
+kaggle_wake_job/pulled_kernel*/
+kaggle_wake_job/script_failed*/
+kaggle_wake_job/voice_dataset/
+kaggle_wake_job/*.wav
+kaggle_wake_job/kernel-*/
+kaggle_wake_job/kernel_*/
+kaggle_wake_job/kernel-metadata.json
+
+# Local browser automation, downloaded source trees, and package caches.
+.chrome-colab-profile/
+node_modules/
+package.json
+package-lock.json
+studio/
+tmp_openwakeword_src/
+tmp_piper_dscripka/
+kout.json
+
+# Private/generated wake and cloned-voice audio caches.
+jarvis_ai/voices/clone_cache/
+jarvis_ai/voices/elevenlabs_cache/
+jarvis_ai/voices/wake_leha_guided*/
 
 # Android build cache.
 android-app/.gradle/

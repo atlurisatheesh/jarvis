@@ -43,6 +43,27 @@ def _is_safe_wake_free_question(low: str) -> bool:
     }
 
 
+def _is_clear_followup_command(low: str) -> bool:
+    """Reject background fragments while still accepting natural questions."""
+    if not low:
+        return False
+    starters = {
+        "what", "who", "where", "when", "why", "how", "can", "could",
+        "would", "will", "do", "does", "did", "is", "are", "am", "tell",
+        "explain", "find", "search", "show", "give", "read", "check", "open",
+        "close", "play", "set", "create", "send", "call", "remind", "calculate",
+        "translate", "write", "start", "stop", "turn", "press", "launch", "take",
+    }
+    if low.split()[0] in starters:
+        return True
+    # Accept Indian-language commands after a clean wake. The wake/session gate
+    # still prevents these from running while Leha is idle.
+    return any(
+        0x0900 <= ord(ch) <= 0x0D7F or 0xA8E0 <= ord(ch) <= 0xA8FF
+        for ch in low
+    )
+
+
 @dataclass
 class TurnResult:
     heard: str
@@ -65,6 +86,7 @@ class AssistantSession:
         # Capped by CONVERSATION_MAX_TURNS so a stale session cannot be
         # extended indefinitely by background room audio.
         self._turn_count = 0
+        self._awaiting_command = False
         self._last_command = ""
         self._last_command_time = 0.0
 
@@ -82,6 +104,7 @@ class AssistantSession:
     def deactivate(self):
         self.active_until = 0.0
         self._turn_count = 0
+        self._awaiting_command = False
 
     def _is_replayed_command(self, command: str, seconds: int = 120) -> bool:
         """Block exact repeated commands caused by speaker echo or stale STT."""
@@ -104,8 +127,17 @@ class AssistantSession:
         Fuzzy one-word variants are useful when followed by a real command, but
         they cause false "Yes, Sir?" replies when room noise is transcribed as
         Leha-like text. Bare wake is therefore intentionally stricter.
+
+        Indian-script STT often glues an extra letter or vowel sign onto the
+        wake word ("లేహాక", "লেখাটা"). A short token that STARTS with an Indic
+        wake trigger still counts as a clean bare wake.
         """
-        return normalize_text(heard).strip(" ,.") in _CLEAN_BARE_WAKE
+        token = normalize_text(heard).strip(" ,.")
+        if token in _CLEAN_BARE_WAKE:
+            return True
+        return len(token) <= 8 and any(
+            token.startswith(trigger) for trigger in INDIC_WAKE_TRIGGERS
+        )
 
     def handle(self, heard: str, ask_brain: Callable[[str], str]) -> TurnResult:
         heard = (heard or "").strip()
@@ -144,7 +176,11 @@ class AssistantSession:
         if config.REQUIRE_TRIGGER and not active and not triggered:
             return TurnResult(heard, ignored_reason="no wake trigger")
 
-        if is_hallucination(heard):
+        confirmation_words = {
+            "yes", "no", "confirm", "cancel", "yeah", "sure", "do it",
+            "yes please", "no thanks", "abort", "nevermind",
+        }
+        if is_hallucination(heard) and not (active and low in confirmation_words):
             return TurnResult(heard, ignored_reason="hallucination")
 
         command = strip_trigger(heard) if triggered else low
@@ -156,17 +192,22 @@ class AssistantSession:
             if not self._is_clean_bare_wake(heard):
                 return TurnResult(heard, ignored_reason="weak_bare_wake")
             self.activate(getattr(config, "WAKE_ONLY_FOLLOWUP_SECONDS", 20), reset=True)
+            self._awaiting_command = True
             reply = "Yes, Sir?"
             set_last_reply(reply)
             return TurnResult(heard, reply, True)
 
         if triggered:
             self.activate(reset=True)
+            self._awaiting_command = False
 
         local = handle_local_intent(command)
         if local.handled:
-            if local.keep_active:
-                self.activate()
+            self._awaiting_command = False
+            if local.keep_active or (
+                self._explicit_followup_seconds and self.followup_seconds > 0
+            ):
+                self.activate(getattr(config, "WAKE_ONLY_FOLLOWUP_SECONDS", 20))
             else:
                 self.deactivate()
             if local.reply:
@@ -176,10 +217,25 @@ class AssistantSession:
         followup_brain_enabled = getattr(config, "FOLLOWUP_BRAIN_ENABLED", False)
         if self._explicit_followup_seconds and self.followup_seconds == 0:
             followup_brain_enabled = False
-        if active and not triggered and not followup_brain_enabled:
+        if self._awaiting_command and not triggered:
+            # A clean bare wake is an explicit activation. Accept exactly one
+            # subsequent non-noise utterance even when STT drops its question
+            # starter (for example "what is two plus two" -> "Two 2").
+            if not command.strip():
+                self.deactivate()
+                return TurnResult(heard, ignored_reason="empty_followup")
+        if active and not triggered and not (
+            followup_brain_enabled
+            or self._awaiting_command
+            or (self._explicit_followup_seconds and self.followup_seconds > 0)
+        ):
             return TurnResult(heard, ignored_reason="followup_requires_wake")
 
         reply = ask_brain(command or heard)
-        self.activate()
+        self._awaiting_command = False
+        if self.followup_seconds > 0 and followup_brain_enabled:
+            self.activate()
+        else:
+            self.deactivate()
         set_last_reply(reply)
         return TurnResult(heard, reply, True)

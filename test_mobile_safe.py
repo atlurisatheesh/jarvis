@@ -41,7 +41,7 @@ CASES = [
 ]
 
 
-def test_routing():
+def _check_routing():
     passed = 0
     for text, expected in CASES:
         result, calls = _route_with_mock(text)
@@ -53,7 +53,7 @@ def test_routing():
     return passed
 
 
-def test_destructive_gated():
+def _check_destructive_gated():
     """Power commands must ask for confirmation, NOT execute on first utterance."""
     passed = 0
     for text in ["shutdown the computer", "restart the laptop", "sleep the computer"]:
@@ -80,7 +80,7 @@ def test_destructive_gated():
     return passed
 
 
-def test_telegram_auth():
+def _check_telegram_auth():
     """Empty allowlist allows all; populated allowlist blocks strangers."""
     import jarvis_ai.telegram_bot as tb
     from jarvis_ai import config
@@ -104,7 +104,7 @@ def test_telegram_auth():
     return 1
 
 
-def test_remote_origin_gate():
+def _check_remote_origin_gate():
     """Remote (web/telegram/phone) must NOT run shell or destructive tools."""
     from jarvis_ai import skills
     passed = 0
@@ -123,16 +123,32 @@ def test_remote_origin_gate():
     return passed
 
 
+def test_routing():
+    assert _check_routing() == len(CASES)
+
+
+def test_destructive_gated():
+    assert _check_destructive_gated() == 5
+
+
+def test_telegram_auth():
+    assert _check_telegram_auth() == 1
+
+
+def test_remote_origin_gate():
+    assert _check_remote_origin_gate() == 6
+
+
 if __name__ == "__main__":
     print("Mobile bridge — safe routing tests (no real actions executed)\n")
     n = 0
     print("Routing (phone message -> correct tool):")
-    n += test_routing()
+    n += _check_routing()
     print("\nDestructive command safety:")
-    n += test_destructive_gated()
+    n += _check_destructive_gated()
     print("\nTelegram authorization:")
-    n += test_telegram_auth()
+    n += _check_telegram_auth()
     print("\nRemote origin gate (shell/destructive blocked over network):")
-    n += test_remote_origin_gate()
+    n += _check_remote_origin_gate()
     print(f"\n{n} checks passed. No SMS, calls, sleep, or shutdown were executed.")
     sys.exit(0)

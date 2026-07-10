@@ -60,9 +60,16 @@ def barge_in_status() -> dict:
     aec = bool(getattr(config, "AEC_ENABLED", False))
     barge = bool(getattr(config, "BARGE_IN_ENABLED", False))
     hardware = bool(getattr(config, "AEC_HARDWARE_DEVICE", None))
+    speex_available = False
+    try:
+        import speexdsp  # noqa: F401
+        speex_available = True
+    except Exception:
+        speex_available = False
     return {
         "enabled": barge,
         "aec_enabled": aec,
+        "software_aec_available": speex_available,
         "hardware_aec_device": getattr(config, "AEC_HARDWARE_DEVICE", None) or "",
         "safe_to_enable": aec or hardware,
         "recommendation": (
@@ -73,43 +80,87 @@ def barge_in_status() -> dict:
     }
 
 
-def wake_validation_status() -> dict:
-    from . import wake_local_onnx
+def wake_data_status() -> dict:
+    """Count wake-word training data and report whether it is enough to train."""
+    positive_dirs = [
+        config.BASE_DIR / "voices" / "wake_leha",
+        config.BASE_DIR / "voices" / "wake_leha_retry",
+        config.BASE_DIR / "voices" / "wake_leha_continuous",
+        config.BASE_DIR / "voices" / "wake_leha_guided",
+    ]
+    positive_dirs.extend(sorted((config.BASE_DIR / "voices").glob("wake_leha_guided_*")))
+    negative_dirs = [
+        config.BASE_DIR.parent / "processed" / "guided_wake_negatives",
+    ]
+    negative_dirs.extend(sorted((config.BASE_DIR.parent / "processed").glob("wake_negative_guided_*")))
+    positive_count = sum(len(list(p.glob("*.wav"))) for p in positive_dirs if p.is_dir())
+    negative_count = sum(len(list(p.glob("*.wav"))) for p in negative_dirs if p.is_dir())
+    good_positive_target = 150
+    good_negative_target = 500
+    return {
+        "positive_clips": positive_count,
+        "negative_clips": negative_count,
+        "positive_target": good_positive_target,
+        "negative_target": good_negative_target,
+        "ready_for_training": positive_count >= good_positive_target and negative_count >= good_negative_target,
+        "recommended_command": (
+            "python tools/guided_wake_improvement.py --positives 120 --negatives 500 --train"
+        ),
+        "note": (
+            "Collect more real Leha clips from this room."
+            if positive_count < good_positive_target
+            else "Positive data is enough; collect negatives or train/evaluate."
+        ),
+    }
 
-    model = Path(getattr(config, "CUSTOM_WAKE_MODEL_PATH", ""))
-    report_path = Path(getattr(config, "CUSTOM_WAKE_EVAL_REPORT", ""))
+
+def wake_validation_status() -> dict:
+    from . import wake_openwakeword
+
+    custom_models = wake_openwakeword._resolve_custom_models()
+    model = Path(custom_models[0]) if custom_models else Path()
+    report_path = config.BASE_DIR / "voices" / "leha_wake_manifest.json"
     report = {}
     if report_path.is_file():
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except Exception:
             report = {}
-    positive_dirs = [
-        config.BASE_DIR / "voices" / "wake_leha",
-        config.BASE_DIR / "voices" / "wake_leha_retry",
-        config.BASE_DIR / "voices" / "wake_leha_continuous",
-    ]
-    positive_count = sum(len(list(p.glob("*.wav"))) for p in positive_dirs if p.is_dir())
-    available = wake_local_onnx.is_available()
+    data = wake_data_status()
+    available = wake_openwakeword.is_available()
+    hybrid = bool(getattr(config, "OWW_HYBRID_TRANSCRIPT_FALLBACK", False))
     return {
-        "engine": "local_onnx" if available else "strict_transcript",
+        "engine": "openwakeword+strict_transcript" if available and hybrid else (
+            "openwakeword" if available else "strict_transcript"
+        ),
         "available": available,
-        "model_present": model.is_file(),
-        "model_path": str(model),
-        "threshold": float(getattr(config, "CUSTOM_WAKE_THRESHOLD", 0.0)),
-        "approval_required": bool(getattr(config, "CUSTOM_WAKE_REQUIRE_APPROVAL", True)),
+        "model_present": bool(custom_models),
+        "model_path": str(model) if custom_models else "",
+        "model_paths": custom_models,
+        "threshold": float(getattr(config, "OWW_THRESHOLD", 0.0)),
+        "required_hits": int(getattr(config, "OWW_REQUIRED_HITS", 2)),
+        "hybrid_transcript_fallback": hybrid,
         "approved": bool(report.get("approved", False)),
         "eval_report": str(report_path),
-        "eval_recall": report.get("positive", {}).get("recall"),
-        "eval_false_wake_rate": report.get("negative", {}).get("false_wake_rate"),
-        "positive_sample_count": positive_count,
+        "eval_recall": report.get("held_out", {}).get("recall"),
+        "eval_false_wake_rate": report.get("held_out", {}).get("false_wake_rate"),
+        "validation_label": report.get("validation_label", "not measured"),
+        "live_spot_check": report.get("live_spot_check", {}),
+        "positive_sample_count": data["positive_clips"],
+        "negative_sample_count": data["negative_clips"],
+        "ready_for_training": data["ready_for_training"],
         "manual_protocol": [
             "Say Leha 20 times from normal distance.",
             "Play YouTube/music for 5 minutes and confirm no false wake.",
             "Say similar words like Layla, Lena, Leela and confirm no wake.",
-            "If misses happen, lower threshold slightly; if false wakes happen, raise it.",
+            "Keep the two-hit threshold unless a new held-out evaluation improves recall without false wakes.",
         ],
     }
+
+
+def wake_miss_status() -> dict:
+    from . import wake_miss_log
+    return wake_miss_log.status()
 
 
 def android_hotword_status() -> dict:
@@ -145,6 +196,43 @@ def streaming_status() -> dict:
         "listener_uses_streaming": True,
         "tts_sentence_streaming_available": True,
         "remaining_gap": "STT is still utterance-based; true streaming STT is the next latency upgrade.",
+    }
+
+
+def siri_parity_status() -> dict:
+    """Concrete readiness map for Siri/Alexa/Jarvis-like behavior."""
+    from . import health
+
+    h = health.check()
+    wake = wake_validation_status()
+    barge = barge_in_status()
+    stream = streaming_status()
+    checks = {
+        "wake_word": h.get("wake_reliable") == "ok",
+        "echo_cancellation": bool(barge["safe_to_enable"]),
+        "streaming_reply": bool(stream["brain_streaming_available"] and stream["tts_sentence_streaming_available"]),
+        "safe_barge_in": bool(barge["enabled"] and barge["safe_to_enable"]),
+        "mobile_hotword": bool(android_hotword_status()["custom_leha_ppn_present"]),
+        "desktop_core": all(h.get(k) == "ok" for k in ("mic_configured", "deepgram_key")) and (
+            h.get("cloudflare") == "ok" or h.get("groq_key") == "ok" or h.get("openai_key") == "ok"
+        ),
+    }
+    next_steps = []
+    if not checks["wake_word"]:
+        next_steps.append("train and approve a local Leha wake model")
+    if not checks["echo_cancellation"]:
+        next_steps.append("use a headset/AEC mic or install validated software AEC")
+    if not checks["safe_barge_in"]:
+        next_steps.append("enable barge-in only after AEC is validated")
+    if not checks["mobile_hotword"]:
+        next_steps.append("add Android custom Leha hotword when available")
+    return {
+        "checks": checks,
+        "wake": wake,
+        "barge_in": barge,
+        "streaming": stream,
+        "ready": all(checks.values()),
+        "next_steps": next_steps,
     }
 
 
@@ -247,9 +335,11 @@ def dashboard_status() -> dict:
         "voice": voice_status(),
         "barge_in": barge_in_status(),
         "wake_validation": wake_validation_status(),
+        "wake_misses": wake_miss_status(),
         "android_hotword": android_hotword_status(),
         "smart_home": smart_home_status(),
         "streaming": streaming_status(),
+        "siri_parity": siri_parity_status(),
         "production": production_status(),
         "notifications": notification_policy(),
         "settings": owner_settings(),
@@ -269,3 +359,24 @@ def spoken_status() -> str:
         f"brain {'cloud ready' if h.get('cloudflare') == 'ok' else 'fallback ready'}. "
         f"Next gaps: {gap_text}."
     )
+
+
+def spoken_siri_parity_status() -> str:
+    status = siri_parity_status()
+    if status["ready"]:
+        return "Leha is ready for pro assistant mode, with wake, streaming, AEC, and barge-in."
+    missing = ", ".join(status["next_steps"][:3])
+    return f"Not fully Siri level yet. Next: {missing}."
+
+
+def spoken_wake_data_status() -> str:
+    data = wake_data_status()
+    return (
+        f"Wake data: {data['positive_clips']} positive and {data['negative_clips']} negative clips. "
+        f"Target is {data['positive_target']} positive and {data['negative_target']} negative."
+    )
+
+
+def spoken_wake_miss_status() -> str:
+    from .wake_miss_log import spoken_status as wake_miss_spoken_status
+    return wake_miss_spoken_status()

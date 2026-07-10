@@ -19,7 +19,7 @@ from .wake_phrases import normalize_text
 class IntentResult:
     handled: bool
     reply: str = ""
-    keep_active: bool = True
+    keep_active: bool = False
     quit_requested: bool = False
     action: str = ""
 
@@ -159,6 +159,42 @@ SAFE_KEY_WORDS = {
     "right arrow": "right",
 }
 
+HOTKEY_WORDS = {
+    "control": "ctrl",
+    "ctrl": "ctrl",
+    "shift": "shift",
+    "alt": "alt",
+    "option": "alt",
+    "windows": "win",
+    "window": "win",
+    "win": "win",
+    "command": "win",
+    "cmd": "win",
+    "enter": "enter",
+    "return": "enter",
+    "escape": "esc",
+    "esc": "esc",
+    "tab": "tab",
+    "space": "space",
+    "spacebar": "space",
+    "backspace": "backspace",
+    "delete": "delete",
+    "home": "home",
+    "end": "end",
+    "pageup": "pageup",
+    "pagedown": "pagedown",
+    "up": "up",
+    "down": "down",
+    "left": "left",
+    "right": "right",
+}
+for _letter in "abcdefghijklmnopqrstuvwxyz":
+    HOTKEY_WORDS[_letter] = _letter
+for _num in "0123456789":
+    HOTKEY_WORDS[_num] = _num
+for _idx in range(1, 13):
+    HOTKEY_WORDS[f"f{_idx}"] = f"f{_idx}"
+
 # --- shared context with the voice loop ---
 _media_state = {"active": False, "last_action": "", "last_action_time": 0.0}
 _last_reply = {"text": ""}
@@ -245,6 +281,8 @@ def _cleanup_youtube_query(text: str) -> str:
     low = normalize_text(text)
     query = re.split(r"\b(?:play|olay|playe|start)\b", low, maxsplit=1)[-1].strip()
     query = re.sub(r"\b(in|on|from)\s+(youtube|you tube)\b", "", query).strip()
+    query = re.sub(r"^(youtube|you tube)\s+", "", query).strip()
+    query = re.sub(r"\s+(youtube|you tube)$", "", query).strip()
     query = query.replace("amusing", "music").replace("musing", "music")
     query = re.sub(r"\btelug\b", "telugu", query)
     query = " ".join(query.split())
@@ -267,14 +305,17 @@ def _is_generic_youtube_music(text: str, query: str) -> bool:
 
 def _is_youtube_play(text: str) -> bool:
     low = normalize_text(text)
-    if not re.search(r"\b(play|olay|playe|start)\b", low):
+    # Plain "start/open YouTube" should launch YouTube, not ask for a song or
+    # trigger the media search path. Only route to play_youtube on explicit
+    # play intent.
+    if not re.search(r"\b(play|olay|playe|start playing)\b", low):
         return False
     return any(word in low for word in MUSIC_WORDS)
 
 
 def _is_spotify_play(text: str) -> bool:
     low = normalize_text(text)
-    return "spotify" in low and re.search(r"\b(play|olay|playe|start)\b", low) is not None
+    return "spotify" in low and re.search(r"\b(play|olay|playe|start playing)\b", low) is not None
 
 
 def _cleanup_spotify_query(text: str) -> str:
@@ -321,15 +362,22 @@ def _open_target(text: str) -> IntentResult | None:
     if not target:
         return None
 
-    if target not in APP_ALIASES:
-        return IntentResult(
-            True,
-            f"I don't know the app {target} yet, Sir.",
-            keep_active=True,
-            action="unknown_open_target",
-        )
+    mapped = APP_ALIASES.get(target)
+    dynamic_target = mapped is None
+    if dynamic_target:
+        # Dynamic fallback: let Windows resolve installed apps, folders, URI
+        # schemes, or typed website names. This is how users expect "open X"
+        # to behave; explicit known aliases above still give polished replies.
+        if re.search(r"\b[a-z0-9-]+\s+dot\s+[a-z]{2,}\b", target):
+            url = target.replace(" dot ", ".").replace(" ", "")
+            result = skills.run_tool("open_url", {"url": url})
+            return IntentResult(True, f"Opening {target}.", action="open_dynamic_url")
+        if re.search(r"\b[a-z0-9-]+\.[a-z]{2,}\b", target):
+            result = skills.run_tool("open_url", {"url": target.replace(" ", "")})
+            return IntentResult(True, f"Opening {target}.", action="open_dynamic_url")
+        result = skills.run_tool("open_app", {"name": target})
+        return IntentResult(True, f"Opening {target}.", action="open_dynamic_app")
 
-    mapped = APP_ALIASES[target]
     if mapped.startswith(("http://", "https://")):
         skills.run_tool("open_url", {"url": mapped})
         spoken = APP_SPOKEN_NAMES.get(target)
@@ -374,8 +422,8 @@ def _close_target(text: str) -> IntentResult | None:
             return IntentResult(True, "Closed the current YouTube tab.", action="close_tab")
         result = skills.run_tool("close_app", {"name": mapped})
         return IntentResult(True, result, action="close_app")
-    result = skills.run_tool("close_current_window", {})
-    return IntentResult(True, result, action="close_window")
+    result = skills.run_tool("close_app", {"name": target})
+    return IntentResult(True, result, action="close_dynamic_app")
 
 
 def _keyboard_key_from_text(text: str) -> str | None:
@@ -388,6 +436,32 @@ def _keyboard_key_from_text(text: str) -> str | None:
     target = m.group(1).strip()
     target = re.sub(r"\s+(?:button|key)$", "", target).strip()
     return SAFE_KEY_WORDS.get(target)
+
+
+def _keyboard_hotkey_from_text(text: str) -> str | None:
+    low = normalize_text(text)
+    m = re.match(r"^(?:press|tap|hit)\s+(?:the\s+)?(.+)$", low)
+    if not m:
+        return None
+    target = m.group(1).strip()
+    target = re.sub(r"\s+(?:button|key|shortcut)$", "", target).strip()
+    target = target.replace("plus", " ")
+    target = target.replace("+", " ")
+    words = [w for w in target.split() if w not in {"and", "then"}]
+    if len(words) < 2:
+        return None
+    combo = []
+    for word in words:
+        mapped = HOTKEY_WORDS.get(word)
+        if not mapped:
+            return None
+        combo.append(mapped)
+    if not any(k in {"ctrl", "shift", "alt", "win"} for k in combo):
+        return None
+    # Keep shortcut length sane; complex sequences should be explicit scripts.
+    if len(combo) > 4:
+        return None
+    return "+".join(combo)
 
 
 def _parse_timer(text: str) -> tuple[int, str] | None:
@@ -403,6 +477,36 @@ def _parse_timer(text: str) -> tuple[int, str] | None:
             label = label_m.group(1).strip()
         return minutes, label
     return None
+
+
+def _is_telugu_song_request(text: str) -> bool:
+    low = normalize_text(text)
+    return (
+        ("\u0c2a\u0c3e\u0c1f" in low or "paata" in low or "pata" in low or "song" in low)
+        and (
+            "\u0c2a\u0c3e\u0c21" in low
+            or "paadu" in low
+            or "padu" in low
+            or "sing" in low
+        )
+        and ("\u0c24\u0c46\u0c32\u0c41\u0c17\u0c41" in low or "telugu" in low or any("\u0c00" <= ch <= "\u0c7f" for ch in low))
+    )
+
+
+def _original_telugu_song() -> str:
+    # Original, short, assistant-created lines. Do not use copyrighted lyrics.
+    return (
+        "\u0c2a\u0c4a\u0c26\u0c4d\u0c26\u0c41 \u0c35\u0c46\u0c32\u0c41\u0c17\u0c41 \u0c28\u0c35\u0c4d\u0c35\u0c41\u0c24\u0c42, "
+        "\u0c2e\u0c28 \u0c26\u0c3e\u0c30\u0c3f \u0c2e\u0c41\u0c02\u0c26\u0c41\u0c15\u0c41 \u0c38\u0c3e\u0c17\u0c41\u0c24\u0c42. "
+        "\u0c1a\u0c3f\u0c28\u0c4d\u0c28 \u0c15\u0c32\u0c32\u0c41 \u0c30\u0c46\u0c15\u0c4d\u0c15\u0c32\u0c48, "
+        "\u0c39\u0c43\u0c26\u0c2f\u0c02 \u0c06\u0c15\u0c3e\u0c36\u0c02\u0c32\u0c4b \u0c0e\u0c17\u0c30\u0c3e\u0c32\u0c3f. "
+        "\u0c1a\u0c3f\u0c30\u0c41\u0c17\u0c3e\u0c32\u0c3f \u0c2e\u0c3e\u0c1f\u0c32\u0c32\u0c4b, "
+        "\u0c06\u0c36\u0c32 \u0c30\u0c3e\u0c17\u0c02 \u0c35\u0c3f\u0c28\u0c3f\u0c2a\u0c3f\u0c02\u0c1a\u0c3e\u0c32\u0c3f. "
+        "\u0c28\u0c21\u0c15 \u0c1a\u0c3f\u0c28\u0c4d\u0c28\u0c26\u0c48\u0c28\u0c3e, "
+        "\u0c28\u0c2e\u0c4d\u0c2e\u0c15\u0c02 \u0c2e\u0c28\u0c15\u0c41 \u0c26\u0c40\u0c2a\u0c2e\u0c35\u0c4d\u0c35\u0c3e\u0c32\u0c3f. "
+        "\u0c32\u0c47\u0c39\u0c3e \u0c28\u0c40 \u0c24\u0c4b\u0c21\u0c41\u0c17\u0c3e, "
+        "\u0c2a\u0c4d\u0c30\u0c24\u0c3f \u0c30\u0c4b\u0c1c\u0c41 \u0c2e\u0c02\u0c1a\u0c3f\u0c17\u0c3e \u0c2e\u0c3e\u0c30\u0c3e\u0c32\u0c3f."
+    )
 
 
 def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
@@ -441,6 +545,9 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         reply = _last_reply["text"] or "I didn't say anything yet, Sir."
         return IntentResult(True, reply, keep_active=True, action="repeat")
 
+    if _is_telugu_song_request(low):
+        return IntentResult(True, _original_telugu_song(), keep_active=True, action="telugu_song")
+
     if low in {"voice profile", "voice status", "speaker profile", "owner voice status"}:
         state = "trained" if speaker_profile.has_profile() else "not trained"
         enabled = "enabled" if getattr(speaker_profile.config, "SPEAKER_VERIFY_ENABLED", False) else "disabled"
@@ -465,6 +572,55 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         from .pro_ops import barge_in_status
         status = barge_in_status()
         return IntentResult(True, status["recommendation"], keep_active=True, action="barge_in_status")
+
+    if low in {"enable barge in", "enable barge-in", "turn on barge in", "turn on barge-in"}:
+        from .pro_ops import barge_in_status
+        from . import pro_settings
+        status = barge_in_status()
+        if not status["safe_to_enable"]:
+            return IntentResult(
+                True,
+                "I cannot safely enable barge-in until AEC or a headset mic is validated.",
+                keep_active=True,
+                action="barge_in_blocked",
+            )
+        pro_settings.save({"barge_in_enabled": True})
+        return IntentResult(True, "Barge-in enabled. Restart Leha to apply it.", action="barge_in_enable")
+
+    if low in {"disable barge in", "disable barge-in", "turn off barge in", "turn off barge-in"}:
+        from . import pro_settings
+        pro_settings.save({"barge_in_enabled": False})
+        return IntentResult(True, "Barge-in disabled. Restart Leha to apply it.", action="barge_in_disable")
+
+    if low in {
+        "siri status", "alexa status", "jarvis status", "siri parity",
+        "are you siri level", "are you alexa level", "are you pro yet",
+        "how close are we to siri", "how close are we to alexa",
+    }:
+        from .pro_ops import spoken_siri_parity_status
+        return IntentResult(True, spoken_siri_parity_status(), keep_active=True, action="siri_parity_status")
+
+    if low in {
+        "wake data status", "wake training status", "wake model status",
+        "how much wake data", "do we have enough wake data",
+    }:
+        from .pro_ops import spoken_wake_data_status
+        return IntentResult(True, spoken_wake_data_status(), keep_active=True, action="wake_data_status")
+
+    if low in {
+        "wake miss status", "wake misses", "missed wake status",
+        "wake suggestions", "wake word suggestions", "missed wake suggestions",
+    }:
+        from .pro_ops import spoken_wake_miss_status
+        return IntentResult(True, spoken_wake_miss_status(), keep_active=True, action="wake_miss_status")
+
+    if low in {"how to train wake word", "how do we train wake word", "how to improve wake word"}:
+        return IntentResult(
+            True,
+            "Run guided wake improvement, record Leha clips, add negatives, then train only if evaluation passes.",
+            keep_active=True,
+            action="wake_training_help",
+        )
 
     if low in {"wake validation", "wake test", "wake word test", "test wake word"}:
         from .pro_ops import wake_validation_status
@@ -504,11 +660,10 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
             entity_id = entity_text.replace(" ", "_")
         elif len(parts) >= 2 and parts[0] in {"light", "switch", "scene", "fan", "cover", "climate", "media_player"}:
             entity_id = parts[0] + "." + "_".join(parts[1:])
-        if not entity_id:
-            return IntentResult(False)
-        tool = "home_assistant_turn_on" if ha_turn.group(1) == "on" else "home_assistant_turn_off"
-        result = skills.run_tool(tool, {"entity_id": entity_id})
-        return IntentResult(True, result, action=tool)
+        if entity_id:
+            tool = "home_assistant_turn_on" if ha_turn.group(1) == "on" else "home_assistant_turn_off"
+            result = skills.run_tool(tool, {"entity_id": entity_id})
+            return IntentResult(True, result, action=tool)
 
     ha_scene = re.match(r"^(?:activate|run|start)\s+(?:scene\s+)?([a-z0-9_. -]+)\s+scene$", low)
     if ha_scene:
@@ -559,8 +714,8 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         or (bool(_words(low) & capability_words) and any(word in low for word in ("laptop", "computer", "system")))
     ):
         reply = (
-            "I can control approved apps, tabs, media and volume; check system, files and screen when asked; "
-            "and use your connected Google and phone services. I cannot access passwords or bypass permissions."
+            "I can access apps, browser tabs, media, volume, files, screen, clipboard, system status, "
+            "PowerShell, Google, and your connected phone. Sensitive actions need your confirmation."
         )
         return IntentResult(True, reply, keep_active=True, action="capabilities")
 
@@ -614,6 +769,11 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         result = skills.run_tool("system_info", {})
         return IntentResult(True, result, action="system_info")
 
+    hotkey_name = _keyboard_hotkey_from_text(low)
+    if hotkey_name:
+        result = skills.run_tool("press_hotkey", {"keys": hotkey_name})
+        return IntentResult(True, result, keep_active=True, action="press_hotkey")
+
     key_name = _keyboard_key_from_text(low)
     if key_name:
         result = skills.run_tool("press_key", {"key": key_name})
@@ -636,6 +796,13 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     if low in {"weather", "weather today", "farm weather", "rain today", "rain forecast"}:
         result = skills.run_tool("get_weather", {})
         return IntentResult(True, result, action="weather")
+
+    search_match = re.match(r"^(?:search|google|look up|find online)\s+(?:for\s+)?(.+)$", low)
+    if search_match:
+        query = search_match.group(1).strip()
+        if query:
+            result = skills.run_tool("web_search", {"query": query})
+            return IntentResult(True, result, action="web_search")
 
     timer_info = _parse_timer(low)
     if timer_info:
@@ -733,7 +900,7 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         message = phone_sms.group(2).strip()
         return _require_confirm(
             "phone_send_sms",
-            lambda n=number, m=message: skills.run_tool("phone_send_sms", {"number": n, "message": m}),
+            lambda n=number, m=message: skills.run_confirmed_tool("phone_send_sms", {"number": n, "message": m}),
             f"Draft SMS to {target}: {message}. Say yes to continue.",
         )
 
@@ -744,7 +911,7 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         message = phone_wa.group(2).strip()
         return _require_confirm(
             "phone_whatsapp",
-            lambda n=number, m=message: skills.run_tool("phone_whatsapp", {"number": n, "message": m}),
+            lambda n=number, m=message: skills.run_confirmed_tool("phone_whatsapp", {"number": n, "message": m}),
             f"Open WhatsApp to {target} with: {message}. Say yes to continue.",
         )
 
@@ -754,9 +921,25 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
         number = PHONE_CONTACT_ALIASES.get(target, target)
         return _require_confirm(
             "phone_call",
-            lambda n=number: skills.run_tool("phone_call", {"number": n}),
+            lambda n=number: skills.run_confirmed_tool("phone_call", {"number": n}),
             f"Call {target} from the phone? Say yes to continue.",
         )
+
+    # Maps navigation must run BEFORE the generic open handler, or
+    # "open google maps and show the route to Tirupati" becomes a garbage
+    # app-open of the whole sentence instead of real directions.
+    if re.search(r"\bmaps?\b|\broute\b|\bdirections?\b|\bnavigat", low):
+        _nav = (
+            re.search(r"(?:route|directions?|navigate|navigation)\s+(?:to|for)\s+(.+)", low)
+            or re.search(r"\bmaps?\b.*?\b(?:to|for)\s+(.+)", low)
+        )
+        if _nav:
+            dest = _nav.group(1).strip(" ?.!,")
+            dest = re.sub(r"\s+(?:from here|on google maps|in google maps)\s*$", "", dest).strip(" ?.!,")
+            dest = re.sub(r"^(?:the\s+)?(?:route|directions?)\s+(?:to|for)\s+", "", dest).strip()
+            if dest and dest not in {"google maps", "maps"}:
+                result = skills.run_tool("open_google_maps", {"destination": dest})
+                return IntentResult(True, result, action="maps")
 
     opened = _open_target(low)
     if opened:
@@ -766,9 +949,46 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     if closed:
         return closed
 
-    if low in {"time", "what time", "what time is it", "tell time", "tell me time"}:
+    if (
+        low in {"time", "what time", "what time is it", "tell time", "tell me time"}
+        or re.search(r"\b(?:current\s+time|present\s+time|time\s+now)\b", low)
+        or re.match(r"^(?:tell|say|give)\s+(?:me\s+)?(?:the\s+)?time\b", low)
+    ):
         result = skills.run_tool("tell_time", {})
         return IntentResult(True, result, action="time")
+
+    if (
+        re.search(r"\b(?:current|my|present)\s+location\b", low)
+        or low in {"where am i", "where are we", "location", "what is the location", "what is my location"}
+    ):
+        result = skills.run_tool("current_location", {})
+        return IntentResult(True, result, action="location")
+
+    # Distance questions in either order:
+    #   "how far is Tirupati" / "distance to Hyderabad"        (place AFTER)
+    #   "I want to go to Tirupati, how far from here"          (place BEFORE)
+    if re.search(r"\bhow far\b|\bdistance\b|\bhow many (?:km|kilomet(?:er|re)s?)\b", low):
+        dest = None
+        m_after = re.search(
+            r"(?:how far(?:\s+is| to)?|distance to|distance from here to|"
+            r"how many (?:km|kilomet(?:er|re)s?) to)\s+(?:the\s+)?(.+)",
+            low,
+        )
+        if m_after:
+            cand = re.sub(r"\s+from\s+(?:here|my location)\s*$", "", m_after.group(1)).strip(" ?.!,")
+            if cand and "from here" not in cand:
+                dest = cand
+        if not dest:
+            m_before = re.search(
+                r"(?:go|going|travel|reach|drive|get)\s+to\s+(.+?)"
+                r"(?:\s+how far|\s+from here|\s+distance|[?.!]|$)",
+                low,
+            )
+            if m_before:
+                dest = m_before.group(1).strip(" ?.!,")
+        if dest:
+            result = skills.run_tool("travel_distance", {"destination": dest})
+            return IntentResult(True, result, action="distance")
 
     # ── Windows system control reflexes ───────────────────────────────
 
@@ -776,28 +996,28 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     if re.search(r"\b(sleep|suspend|hibernate(?! laptop))\b", low) and re.search(r"\b(computer|laptop|pc|system)\b", low) or low in {"sleep", "suspend", "go to sleep"}:
         return _require_confirm(
             "sleep_pc",
-            lambda: skills.run_tool("sleep_pc", {}),
+            lambda: skills.run_confirmed_tool("sleep_pc", {}),
             "Sleep the laptop, Sir? Say yes or no.",
         )
 
     if re.search(r"\b(shutdown|shut down|power off|turn off|switch off)\b", low) and re.search(r"\b(computer|laptop|pc|system)\b", low):
         return _require_confirm(
             "shutdown_pc",
-            lambda: skills.run_tool("shutdown_pc", {}),
+            lambda: skills.run_confirmed_tool("shutdown_pc", {}),
             "Shut down the laptop, Sir? Say yes or no.",
         )
 
     if re.search(r"\b(restart|reboot|re-boot)\b", low) and re.search(r"\b(computer|laptop|pc|system)\b", low):
         return _require_confirm(
             "restart_pc",
-            lambda: skills.run_tool("restart_pc", {}),
+            lambda: skills.run_confirmed_tool("restart_pc", {}),
             "Restart the laptop, Sir? Say yes or no.",
         )
 
     if re.search(r"\b(hibernate)\b", low):
         return _require_confirm(
             "hibernate_pc",
-            lambda: skills.run_tool("hibernate_pc", {}),
+            lambda: skills.run_confirmed_tool("hibernate_pc", {}),
             "Hibernate the laptop, Sir? Say yes or no.",
         )
 
@@ -839,12 +1059,18 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
 
     # Network
     if low in {"wifi on", "turn on wifi", "enable wifi", "wifi enable"}:
-        result = skills.run_tool("toggle_wifi", {"state": "on"})
-        return IntentResult(True, result, action="wifi_on")
+        return _require_confirm(
+            "wifi_on",
+            lambda: skills.run_confirmed_tool("toggle_wifi", {"state": "on"}),
+            "Turn Wi-Fi on, Sir? Say yes or no.",
+        )
 
     if low in {"wifi off", "turn off wifi", "disable wifi", "wifi disable"}:
-        result = skills.run_tool("toggle_wifi", {"state": "off"})
-        return IntentResult(True, result, action="wifi_off")
+        return _require_confirm(
+            "wifi_off",
+            lambda: skills.run_confirmed_tool("toggle_wifi", {"state": "off"}),
+            "Turn Wi-Fi off, Sir? Say yes or no.",
+        )
 
     if low in {"my ip", "what is my ip", "ip address", "what is my ip address"}:
         result = skills.run_tool("get_ip", {})
@@ -863,8 +1089,11 @@ def handle_local_intent(text: str, wake_free: bool = False) -> IntentResult:
     m_kill = re.match(r"(?:kill|force close|force quit|end)\s+(?:process\s+)?(.+)$", low)
     if m_kill:
         proc = m_kill.group(1).strip()
-        result = skills.run_tool("kill_process", {"name": proc})
-        return IntentResult(True, result, action="kill_process")
+        return _require_confirm(
+            "kill_process",
+            lambda p=proc: skills.run_confirmed_tool("kill_process", {"name": p}),
+            f"Force close {proc}, Sir? Say yes or no.",
+        )
 
     # Battery
     if low in {"battery report", "battery health", "show battery report"}:

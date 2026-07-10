@@ -96,6 +96,30 @@ class TestConversationStore(unittest.TestCase):
             f.write("{not valid json")
         self.assertEqual(conversation_store.load_recent(), [])
 
+    def test_known_test_artifacts_are_preserved_on_disk_but_not_recalled(self):
+        conversation_store.save_turn("first", "local reply")
+        raw = json.loads(__import__("pathlib").Path(self._tmp.name).read_text(encoding="utf-8"))
+        self.assertEqual(len(raw), 1)
+        self.assertEqual(conversation_store.load_recent(), [])
+
+    def test_brain_rehydrates_only_configured_recent_turns(self):
+        from jarvis_ai import brain
+
+        with patch("jarvis_ai.brain.conversation_store.load_recent", return_value=[]) as load, \
+             patch("jarvis_ai.brain.config.CONVERSATION_REHYDRATE_TURNS", 4):
+            brain._initial_messages()
+        load.assert_called_once_with(4)
+
+    def test_restart_history_is_labeled_and_cannot_look_like_current_tool_work(self):
+        from jarvis_ai import brain
+
+        prior = [{"user": "calculate 10 plus 15", "assistant": "25"}]
+        with patch("jarvis_ai.brain.conversation_store.load_recent", return_value=prior):
+            messages = brain._initial_messages()
+        self.assertEqual(messages[-1]["role"], "system")
+        self.assertIn("Historical conversation context", messages[-1]["content"])
+        self.assertIn("Never repeat an old tool call", messages[-1]["content"])
+
 
 class TestConversationClearReflex(unittest.TestCase):
     """The 'forget our conversation' local reflex."""

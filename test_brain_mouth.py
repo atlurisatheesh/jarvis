@@ -4,7 +4,8 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 from jarvis_ai.brain import Brain
 from jarvis_ai.mouth import Mouth
 
-def test_jarvis():
+def run_manual_brain_mouth_test():
+    """Audible manual smoke test; intentionally excluded from pytest."""
     print("Testing JARVIS Brain and Mouth (bypassing microphone)...")
     brain = Brain()
     mouth = Mouth()
@@ -27,4 +28,4 @@ def test_jarvis():
     print("\nTest complete!")
 
 if __name__ == "__main__":
-    test_jarvis()
+    run_manual_brain_mouth_test()

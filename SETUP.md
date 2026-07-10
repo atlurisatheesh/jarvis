@@ -216,9 +216,39 @@ Leave `STT_ENGINE` unset or set it to `auto` to prefer Deepgram when its key is
 available, then OpenAI, then Groq, then local Whisper. Restart Leha after any
 key or engine change.
 
-## Optional better voice
+## Live cloned voice
 
-Leha uses Edge neural TTS for live instant replies:
+When both private local files `.elevenlabs_key` and `.elevenlabs_voice` exist,
+Leha automatically uses the ElevenLabs clone with progressive PCM streaming:
+
+```python
+TTS_ENGINE = "elevenlabs"
+ELEVENLABS_MODEL = "eleven_multilingual_v2"
+```
+
+The multilingual model is deliberately selected for better voice identity.
+`eleven_flash_v2_5` starts faster but can reduce fidelity. Edge neural TTS is
+the automatic fallback only if cloned audio has not begun. Leha never changes
+to Edge after partial cloned playback, preventing a second voice mid-reply.
+
+To create a replacement safely, without deleting or changing the working
+voice:
+
+```powershell
+python tools/redo_elevenlabs_voice.py "C:\path\to\clean-authorized-voice.mp3"
+```
+
+Listen to `jarvis_ai/voices/elevenlabs_candidate_test.mp3`. Activate only when
+it is demonstrably better:
+
+```powershell
+python tools/redo_elevenlabs_voice.py "C:\path\to\clean-authorized-voice.mp3" --activate
+.\scripts\restart_leha.ps1
+```
+
+The old live voice ID is backed up locally and is never deleted by this tool.
+
+Without ElevenLabs credentials, Leha uses Edge neural TTS:
 
 ```python
 TTS_ENGINE = "edge"
@@ -226,8 +256,8 @@ EDGE_TTS_VOICE = "en-US-AvaMultilingualNeural"
 EDGE_TTS_RATE = "-3%"
 ```
 
-This is the practical live voice on this CPU-only laptop. It is human-sounding
-and responds quickly.
+This is the free backup voice on this CPU-only laptop. It is human-sounding
+and responds quickly, but it is not a clone.
 
 Audition samples are saved here:
 
@@ -266,8 +296,9 @@ Voice cloning options tested on this laptop:
 - Piper: fast local TTS, but custom voice training needs a transcribed dataset
   and a training workflow, usually on GPU/Colab.
 
-For instant conversation, keep `TTS_ENGINE = "edge"`. For offline cloned samples,
-use `jarvis_ai.voice_clone` or OpenVoice CLI.
+For free instant conversation, use `TTS_ENGINE = "edge"`. For the live hosted
+clone, keep `TTS_ENGINE` unset so configuration automatically selects
+ElevenLabs when its private key and voice ID are available.
 
 ## Hugging Face instant voice
 

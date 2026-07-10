@@ -24,6 +24,23 @@ def test_default_is_indian_english():
     assert profile.edge_voice == "en-IN-NeerjaNeural"
 
 
+def test_detect_romanized_telugu_and_voice():
+    profile = language.detect_language("nannu antey nanu antundi")
+
+    assert profile.code == "te"
+    assert profile.edge_voice == "te-IN-ShrutiNeural"
+    assert language.is_romanized_indian_language("nannu antey nanu antundi")
+
+
+def test_romanized_telugu_instruction_asks_native_script():
+    from jarvis_ai.brain import _final_answer_instruction
+
+    instruction = _final_answer_instruction("nannu antey nanu antundi")
+
+    assert "native Indian script" in instruction
+    assert "not romanized English letters" in instruction
+
+
 def test_nvidia_uses_sarvam_for_indian_language_turn():
     from jarvis_ai.brain import _NvidiaSarvamBrain
 
@@ -53,6 +70,29 @@ def test_direct_sarvam_fallback_only_for_indian_turns():
 
     assert brain._sarvam_ai in indian_chain
     assert brain._sarvam_ai not in english_chain
+
+
+def test_nvidia_is_skipped_for_english_when_english_flag_disabled():
+    from jarvis_ai.brain import Brain
+
+    brain = Brain.__new__(Brain)
+    brain._nvidia = object()
+    brain._sarvam_ai = None
+    brain._cloudflare = object()
+    brain._groq = None
+    brain._openai = None
+    brain._local = object()
+
+    with mock.patch("jarvis_ai.brain.config.NVIDIA_BRAIN_ENGLISH_ENABLED", False), \
+         mock.patch("jarvis_ai.brain.language.is_indian_language", return_value=False):
+        english_chain = brain._chain("Leha tell me a joke")
+
+    with mock.patch("jarvis_ai.brain.config.NVIDIA_BRAIN_ENGLISH_ENABLED", False), \
+         mock.patch("jarvis_ai.brain.language.is_indian_language", return_value=True):
+        indian_chain = brain._chain("indian language turn")
+
+    assert brain._nvidia not in english_chain
+    assert brain._nvidia in indian_chain
 
 
 def test_edge_tts_keeps_unicode_text():

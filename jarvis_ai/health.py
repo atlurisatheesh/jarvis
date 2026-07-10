@@ -66,8 +66,11 @@ def check() -> dict:
             r["wake_engine"] = "local_onnx"
             r["wake_reliable"] = "ok"
         elif wake_openwakeword.is_available():
-            r["wake_engine"] = "openwakeword"
-            r["wake_reliable"] = "ok"
+            hybrid = bool(getattr(config, "OWW_HYBRID_TRANSCRIPT_FALLBACK", False))
+            r["wake_engine"] = "openwakeword+strict_transcript" if hybrid else "openwakeword"
+            # Hybrid is safer and faster than transcript-only, but still needs
+            # a human room test before it can be called fully validated.
+            r["wake_reliable"] = "hybrid" if hybrid else "ok"
         else:
             strict = bool(getattr(config, "TRANSCRIPT_WAKE_STRICT", True))
             r["wake_engine"] = "strict_transcript" if strict else "whisper_fallback"

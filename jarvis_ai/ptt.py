@@ -16,7 +16,7 @@ _STOP = {"stop", "exit", "quit", "goodbye", "bye"}
 
 
 def main():
-    print("Loading JARVIS (push-to-talk)...")
+    print(f"Loading {config.ASSISTANT_NAME} (push-to-talk)...")
     ears = Ears()
     brain = Brain()
     mouth = Mouth()
@@ -43,7 +43,7 @@ def main():
         result = session.handle(text, brain.ask)
         if result.reply:
             mouth.say(result.reply)
-    print("JARVIS offline.")
+    print(f"{config.ASSISTANT_NAME} offline.")
 
 
 if __name__ == "__main__":

@@ -40,11 +40,26 @@ def _initial_messages() -> list[dict]:
     """
     msgs = [{"role": "system", "content": _system_prompt()}]
     try:
-        prior = conversation_store.as_messages(
-            int(getattr(config, "CONVERSATION_PERSIST_TURNS", 50) // 2)
+        prior = conversation_store.load_recent(
+            int(getattr(config, "CONVERSATION_REHYDRATE_TURNS", 4))
         )
         if prior:
-            msgs.extend(prior)
+            lines = []
+            for turn in prior:
+                user = str(turn.get("user", "")).strip()[:240]
+                assistant = str(turn.get("assistant", "")).strip()[:320]
+                if user and assistant:
+                    lines.append(f"User previously: {user}\nAssistant previously: {assistant}")
+            if lines:
+                msgs.append({
+                    "role": "system",
+                    "content": (
+                        "Historical conversation context follows. Use it only "
+                        "for continuity. Never repeat an old tool call, action, "
+                        "or answer unless the current user explicitly asks.\n\n"
+                        + "\n\n".join(lines)
+                    ),
+                })
     except Exception:
         pass
     return msgs
@@ -71,8 +86,15 @@ def _with_semantic_memory(user_text: str) -> str:
 def _final_answer_instruction(user_text: str) -> str:
     """Provider-local instruction to prevent reasoning text in spoken replies."""
     if language.is_indian_language(user_text):
+        script_rule = (
+            "The user used English letters for an Indian language. Reply in the native Indian script "
+            "for correct text-to-speech pronunciation, not romanized English letters. "
+            if language.is_romanized_indian_language(user_text)
+            else ""
+        )
         return (
-            "Reply with only the final answer in the same Indian language/script. "
+            "Reply with only the final answer in the same Indian language. "
+            f"{script_rule}"
             "No English explanation. No reasoning. No <think> text. Request: "
             f"{user_text}"
         )
@@ -80,13 +102,21 @@ def _final_answer_instruction(user_text: str) -> str:
 
 
 def _clean_provider_reply(text: str) -> str:
-    """Remove leaked reasoning wrappers from hosted models before TTS."""
+    """Remove leaked reasoning/tool wrappers from hosted models before TTS."""
     reply = (text or "").strip()
     if "</think>" in reply:
         reply = reply.split("</think>", 1)[1].strip()
     if "<think>" in reply:
         before, _, after = reply.partition("<think>")
         reply = (before + " " + after).strip()
+
+    # Some non-tool-calling providers occasionally emit function-call markup as
+    # text. Never speak those hidden control fragments to the user.
+    reply = re.sub(r"<function=[^>]*>.*?</function>", "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
+    reply = re.sub(r"<tool_call>.*?</tool_call>", "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
+    reply = re.sub(r"```(?:json)?\s*\{[^`]*(?:\"tool\"|\"function\"|\"arguments\"|\"command\")[^`]*\}\s*```", "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
+    reply = re.sub(r"<\|[^|]+?\|>", "", reply, flags=re.DOTALL).strip()
+
     for prefix in (
         "Okay, the user wants",
         "Okay, the user asked",
@@ -102,7 +132,7 @@ def _clean_provider_reply(text: str) -> str:
             lines = [line.strip() for line in reply.splitlines() if line.strip()]
             reply = lines[-1] if lines else reply
             break
-    return reply.strip()
+    return reply.strip() or "I heard you, Sir."
 
 
 def _openai_tools() -> list:
@@ -316,6 +346,8 @@ class _GroqBrain:
 
         # Parse SSE stream
         content = ""
+        emitted = 0       # chars of `content` already yielded to TTS
+        leaked = False    # model wrote tool markup as plain text
         tool_calls_acc: dict = {}  # index -> {id, name, arguments}
 
         for raw_line in r.iter_lines():
@@ -348,11 +380,66 @@ class _GroqBrain:
                 if fn.get("arguments"):
                     tool_calls_acc[i]["arguments"] += fn["arguments"]
 
-            # Yield text tokens immediately (enables pipeline TTS)
+            # Yield text tokens immediately (enables pipeline TTS). Some
+            # models leak tool-call markup as plain text ("<function=...");
+            # never speak that. Tokens are held back while the tail could be
+            # the start of a markup tag, so fragments like "Sir, <" are never
+            # spoken either.
             text = delta.get("content") or ""
             if text and not tool_calls_acc:
                 content += text
-                yield text
+                if leaked or "<function" in content or "<tool_call" in content:
+                    leaked = True
+                    continue
+                hold = 0
+                for marker in ("<function", "<tool_call"):
+                    for k in range(len(marker), 0, -1):
+                        if content.endswith(marker[:k]):
+                            hold = max(hold, k)
+                            break
+                emit_to = len(content) - hold
+                if emit_to > emitted:
+                    yield content[emitted:emit_to]
+                    emitted = emit_to
+
+        if not tool_calls_acc and not leaked and emitted < len(content):
+            yield content[emitted:]
+            emitted = len(content)
+
+        if not tool_calls_acc and leaked:
+            # The model wrote a tool call as text instead of calling it.
+            # Re-ask without tools for a plain spoken answer.
+            print("[brain] tool markup leaked in stream; re-asking without tools", flush=True)
+            try:
+                p2 = {
+                    "model": config.GROQ_BRAIN_MODEL,
+                    "messages": self._clean_messages() + [{
+                        "role": "user",
+                        "content": (
+                            "Answer the previous question directly in one short "
+                            "spoken sentence. Never mention tools, functions, "
+                            "commands, or what you would need to do."
+                        ),
+                    }],
+                    "max_tokens": config.BRAIN_NUM_PREDICT,
+                    "tool_choice": "none",
+                }
+                r2 = requests.post(
+                    _GROQ_CHAT_URL,
+                    headers={
+                        "Authorization": f"Bearer {config.GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=p2,
+                    timeout=config.GROQ_TIMEOUT_SECONDS,
+                )
+                r2.raise_for_status()
+                reply = _clean_provider_reply(r2.json()["choices"][0]["message"].get("content", ""))
+                content = reply
+                yield reply
+            except Exception as e:
+                print(f"[brain] leak-recovery retry failed: {e}")
+                content = ""
 
         if tool_calls_acc:
             # Tool call path: build tool_calls list, execute, get final reply
@@ -498,7 +585,7 @@ class _CloudflareBrain:
                 self.messages.append({"role": "assistant", "content": msg.get("content"),
                                       "tool_calls": tool_calls})
             else:
-                reply = (msg.get("content") or "").strip()
+                reply = _clean_provider_reply(msg.get("content") or "")
                 self.messages.append({"role": "assistant", "content": reply})
                 self._trim()
                 return reply
@@ -568,6 +655,8 @@ class _CloudflareBrain:
             text = delta.get("content") or ""
             if text and not tool_calls_acc:
                 content += text
+                if "<function" in content or "<tool_call" in content:
+                    continue
                 yield text
 
         if tool_calls_acc:
@@ -602,7 +691,7 @@ class _CloudflareBrain:
                     "max_tokens": config.BRAIN_NUM_PREDICT,
                 }, timeout=config.CF_BRAIN_TIMEOUT_SECONDS)
                 r2.raise_for_status()
-                reply = r2.json()["choices"][0]["message"].get("content", "").strip()
+                reply = _clean_provider_reply(r2.json()["choices"][0]["message"].get("content", ""))
                 self.messages.append({"role": "assistant", "content": reply})
                 self._trim()
                 yield reply
@@ -669,15 +758,29 @@ class _NvidiaSarvamBrain:
         self.messages.append({"role": "user", "content": _with_semantic_memory(_final_answer_instruction(user_text))})
         for _ in range(5):
             model = self._model_for(user_text)
-            payload = {
-                "model": model,
-                "messages": self._clean_messages(),
-                "tools": self._tools,
-                "tool_choice": "auto",
-                "max_tokens": self._max_tokens_for(user_text),
-                "temperature": 0.5,
-                "top_p": 1,
-            }
+            indian = model == getattr(config, "NVIDIA_INDIAN_LANGUAGE_MODEL", "")
+            if indian:
+                # NVIDIA's sarvam-m endpoint rejects tool-calling requests and
+                # any history it deems malformed ("System message can only be
+                # the first message!"). Send a minimal fresh conversation:
+                # system prompt + the current user turn only.
+                payload = {
+                    "model": model,
+                    "messages": [self.messages[0], self.messages[-1]],
+                    "max_tokens": self._max_tokens_for(user_text),
+                    "temperature": 0.5,
+                    "top_p": 1,
+                }
+            else:
+                payload = {
+                    "model": model,
+                    "messages": self._clean_messages(),
+                    "tools": self._tools,
+                    "tool_choice": "auto",
+                    "max_tokens": self._max_tokens_for(user_text),
+                    "temperature": 0.5,
+                    "top_p": 1,
+                }
             r = requests.post(
                 f"{self._base_url}/chat/completions",
                 headers=self._headers,
@@ -793,6 +896,8 @@ class _NvidiaSarvamBrain:
             text = delta.get("content") or ""
             if text and not tool_calls_acc:
                 content += text
+                if "<function" in content or "<tool_call" in content:
+                    continue
                 yield text
 
         if tool_calls_acc:
@@ -941,11 +1046,13 @@ def _cf_available() -> bool:
 
 
 class Brain:
-    """Ordered brain chain. Preferred order: Cloudflare -> Groq -> OpenAI -> local.
+    """Ordered brain chain.
 
-    Each tier is tried until one answers; a throttled/erroring tier falls through
-    to the next. Cloudflare (Llama-3.3-70B) is primary; kept warm to dodge the
-    ~30s cold-start.
+    English turns: Groq -> Cloudflare -> OpenAI -> local Ollama (qwen, last
+    resort only). Indian-language turns: NVIDIA sarvam-m -> Sarvam direct ->
+    the same English chain. Each tier is tried until one answers; a throttled
+    or erroring tier falls through to the next. Cloudflare is kept warm to
+    dodge its ~30s cold-start.
     """
 
     def __init__(self):
@@ -1012,20 +1119,28 @@ class Brain:
         threading.Thread(target=loop, daemon=True).start()
 
     def _chain(self, user_text: str = ""):
-        sarvam_direct = getattr(self, "_sarvam_ai", None) if language.is_indian_language(user_text or "") else None
+        indian_turn = language.is_indian_language(user_text or "")
+        nvidia = getattr(self, "_nvidia", None)
+        if nvidia and not indian_turn and not getattr(config, "NVIDIA_BRAIN_ENGLISH_ENABLED", False):
+            nvidia = None
+        sarvam_direct = getattr(self, "_sarvam_ai", None) if indian_turn else None
         if getattr(config, "NVIDIA_BRAIN_PRIORITY", True):
+            # Indian turns: NVIDIA sarvam-m, then Sarvam direct. English turns:
+            # Groq first — it has the lowest first-token latency of the cloud
+            # tiers, which keeps spoken replies feeling instant. Local Ollama
+            # (qwen) is always the last offline fallback.
             order = (
-                getattr(self, "_nvidia", None),
+                nvidia,
                 sarvam_direct,
-                getattr(self, "_cloudflare", None),
                 getattr(self, "_groq", None),
+                getattr(self, "_cloudflare", None),
                 getattr(self, "_openai", None),
                 getattr(self, "_local", None),
             )
         else:
             order = (
                 getattr(self, "_cloudflare", None),
-                getattr(self, "_nvidia", None),
+                nvidia,
                 sarvam_direct,
                 getattr(self, "_groq", None),
                 getattr(self, "_openai", None),
@@ -1129,14 +1244,18 @@ class Brain:
             if not self._ready(b):
                 continue
             started = time.perf_counter()
+            emitted = False
             try:
                 streamer = getattr(b, "ask_stream", None)
                 if callable(streamer):
                     first_token = True
                     for token in streamer(user_text):
+                        if not token:
+                            continue
                         if first_token:
                             runtime.timing("brain_first_token", (time.perf_counter() - started) * 1000)
                             first_token = False
+                        emitted = True
                         yield token
                     self._success(b, started)
                     return
@@ -1146,9 +1265,18 @@ class Brain:
                 return
             except _GroqRateLimited as e:
                 self._failure(b, e)
+                # Once speech has started, switching providers would append a
+                # second answer to the first one. Preserve the partial reply
+                # and let the next user turn retry with the fallback chain.
+                if emitted:
+                    print("[brain] stream ended after speech started; suppressing duplicate fallback.", flush=True)
+                    return
                 continue
             except Exception as e:
                 self._failure(b, e)
                 print(f"[brain] {type(b).__name__} stream error: {e}; next tier.")
+                if emitted:
+                    print("[brain] stream ended after speech started; suppressing duplicate fallback.", flush=True)
+                    return
                 continue
         yield "All my brains are unreachable right now, Sir."

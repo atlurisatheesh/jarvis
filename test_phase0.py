@@ -154,22 +154,22 @@ class TestRetentionCleanup(unittest.TestCase):
 class TestSupervisorHealthCheck(unittest.TestCase):
     def test_health_check_returns_int(self):
         from jarvis_ai import supervisor
-        with patch("jarvis_ai.health.summary", return_value="ok"):
-            with patch("jarvis_ai.health.check", return_value={"mic": True, "brain": True}):
+        with patch("jarvis_ai.health.summary", return_value="ok"), \
+             patch("jarvis_ai.health.startup_gate", return_value=(True, [])):
                 code = supervisor.health_check()
         self.assertIsInstance(code, int)
 
     def test_health_check_zero_on_healthy(self):
         from jarvis_ai import supervisor
-        with patch("jarvis_ai.health.summary", return_value="ok"):
-            with patch("jarvis_ai.health.check", return_value={"mic": True, "net": True}):
+        with patch("jarvis_ai.health.summary", return_value="ok"), \
+             patch("jarvis_ai.health.startup_gate", return_value=(True, [])):
                 code = supervisor.health_check()
         self.assertEqual(code, 0)
 
     def test_health_check_nonzero_on_failure(self):
         from jarvis_ai import supervisor
-        with patch("jarvis_ai.health.summary", return_value="partial"):
-            with patch("jarvis_ai.health.check", return_value={"mic": True, "brain": False}):
+        with patch("jarvis_ai.health.summary", return_value="partial"), \
+             patch("jarvis_ai.health.startup_gate", return_value=(False, ["brain"])):
                 code = supervisor.health_check()
         self.assertEqual(code, 1)
 
